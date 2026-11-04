@@ -448,9 +448,10 @@ function setExperimentalMode(enabled) {
 function normalizeStableTaskDraft(draft, experimental = false) {
     const normalized = { ...(draft || {}) };
     if (experimental) return normalized;
+    // MP4 已作为稳定输出格式提供（普通 MPEG-TS 分片经 mux.js 转封装）；
+    // 稳定模式仅强制关闭边下边存并清空外部音轨/字幕选择。
     return {
         ...normalized,
-        format: 'ts',
         streamSave: false,
         selectedAudioRenditionId: '',
         selectedAudioCodecFamily: '',
@@ -472,10 +473,7 @@ function getStableTaskCompatibility(task, experimental = false) {
         return { ok: false, reason: 'experimental-rendition', message: '当前任务包含外部音轨或字幕，请在设置中开启实验功能（实验模式）后继续；历史记录和缓存已保留。' };
     }
     if (task?.streamSave) {
-        return { ok: false, reason: 'experimental-stream-save', message: '边下边存需要实验模式，稳定模式请使用 TS 普通缓存下载。' };
-    }
-    if (task?.format === 'mp4') {
-        return { ok: false, reason: 'experimental-mp4', message: 'MP4 输出需要实验模式，稳定模式请按 TS 重新创建任务。' };
+        return { ok: false, reason: 'experimental-stream-save', message: '边下边存需要实验模式，稳定模式请使用普通缓存下载。' };
     }
     return { ok: true, reason: '', message: '' };
 }
@@ -540,7 +538,7 @@ function parseQuickDownloadParams(search = globalThis.location?.search || '') {
     const ignore = normalizeQuickDownloadIgnore(params.ignore);
     const experimental = resolveExperimentalMode(search);
     const stableModeDowngraded = !experimental
-        && (params.format === 'mp4' || params.streamSave === true);
+        && (params.streamSave === true);
     return {
         ...normalizeStableTaskDraft({
         ...params,
@@ -5945,6 +5943,67 @@ async function confirmTaskQualitySelection() {
     resetPendingTaskDraft();
 }
 
+function getInjectScriptBaseUrl() {
+    try {
+        const loc = globalThis.location || window.location;
+        return new URL('.', loc.href).href;
+    } catch (_) {
+        return './';
+    }
+}
+
+function buildCrossOriginInjectCode() {
+    const base = getInjectScriptBaseUrl();
+    const scriptUrl = new URL('inject.js', base).href;
+    return '(function(){'
+        + 'if(window.__m3u8InjectV2Loaded__){window.__m3u8InjectV2Show__&&window.__m3u8InjectV2Show__();return;}'
+        + 'window.__M3U8_BASE__=' + JSON.stringify(base) + ';'
+        + 'var s=document.createElement("script");'
+        + 's.src=' + JSON.stringify(scriptUrl) + ';'
+        + 'document.head.appendChild(s);'
+        + '})();';
+}
+
+function copyTextViaExecCommand(text) {
+    try {
+        const textarea = document.createElement('textarea');
+        textarea.value = String(text || '');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        return Boolean(ok);
+    } catch (_) {
+        return false;
+    }
+}
+
+async function copyCrossOriginInjectCode() {
+    const code = buildCrossOriginInjectCode();
+    let copied = false;
+    try {
+        if (globalThis.navigator?.clipboard?.writeText) {
+            await globalThis.navigator.clipboard.writeText(code);
+            copied = true;
+        }
+    } catch (_) {
+        copied = false;
+    }
+    if (!copied) {
+        copied = copyTextViaExecCommand(code);
+    }
+    if (copied) {
+        showToast('跨域代码已复制，请到视频源站 F12 控制台粘贴执行');
+    } else {
+        showToast('复制失败，请在控制台查看代码后手动复制', { duration: 3200 });
+        console.info('[M3U8] 跨域注入代码：\n' + code);
+    }
+    return code;
+}
+
 function setupEventListeners() {
     document.addEventListener('paste', handleGlobalPaste);
     document.addEventListener('mouseover', handleTooltipMouseOver);
@@ -5974,6 +6033,11 @@ function setupEventListeners() {
 
     const helpBtn = document.getElementById('help-btn');
     if (helpBtn) helpBtn.addEventListener('click', () => openModal('help'));
+
+    const crossOriginCodeBtn = document.getElementById('cross-origin-code-btn');
+    if (crossOriginCodeBtn) {
+        crossOriginCodeBtn.addEventListener('click', copyCrossOriginInjectCode);
+    }
 
     const taskListNewBtn = document.getElementById('task-list-new-download-btn');
     if (taskListNewBtn) {
@@ -7125,7 +7189,7 @@ function getRuntimeErrorInfo(error, fallbackMessage = '') {
             'source_access',
             '源站限制',
             SOURCE_ACCESS_RESTRICTED_ERROR,
-            '请确认该链接在当前浏览器能直接访问；若源站需要 Cookie、Referer 或禁止跨域，纯静态模式无法绕过。'
+            '请确认该链接在当前浏览器能直接访问；若源站禁止跨域，可点击“跨域下载”复制代码到源站控制台执行。'
         );
     }
     if (rawMessage === SOURCE_ACCESS_RESTRICTED_ERROR || /HTTP\s+(401|403)\b/i.test(rawMessage)) {
@@ -7133,7 +7197,7 @@ function getRuntimeErrorInfo(error, fallbackMessage = '') {
             'source_access',
             '源站限制',
             SOURCE_ACCESS_RESTRICTED_ERROR,
-            '请确认该链接在当前浏览器能直接访问；若源站需要 Cookie、Referer 或禁止跨域，纯静态模式无法绕过。'
+            '请确认该链接在当前浏览器能直接访问；若源站需要 Cookie、Referer 或禁止跨域，可点击“跨域下载”复制代码到源站控制台执行。'
         );
     }
     if (/mixed content|insecure resource|https.*http/i.test(rawMessage)) {
