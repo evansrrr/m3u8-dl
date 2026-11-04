@@ -22,7 +22,9 @@ const modalPanels = Array.from(document.querySelectorAll('.modal-panel'));
 let currentTasks = [];
 const selectedTaskIds = new Set();
 let pendingTaskSelectionFocusId = null;
-let currentTheme = readLocalStorageValue('theme') || 'light';
+const systemThemeQuery = typeof globalThis.matchMedia === 'function'
+    ? globalThis.matchMedia('(prefers-color-scheme: dark)')
+    : null;
 let activeModalId = null;
 let pendingModalId = null;
 let isModalClosing = false;
@@ -38,7 +40,6 @@ const taskRunTokens = new Map();
 const taskRetryDelayCancellations = new Map();
 const confirmedDeletedTaskIds = new Set();
 const suspendedTaskExecutions = new Set();
-let hasShownStableQuickDownloadDowngradeWarning = false;
 let activeTaskDetailsId = null;
 let pendingQualitySelectionId = '';
 let pendingTaskDraft = null;
@@ -340,12 +341,11 @@ const modalById = {
 };
 
 const DEFAULT_TASK_PARAMS_STORAGE_KEY = 'default-task-params';
-const EXPERIMENTAL_FEATURES_STORAGE_KEY = 'experimental-features-enabled';
 const LEGACY_SEGMENT_CACHE_DB_NAME = 'm3u8-downloader-segment-cache';
 const LEGACY_SEGMENT_CACHE_CLEANUP_KEY = 'legacy-segment-cache-cleanup-v1';
 const DEFAULT_TASK_PARAMS = {
     titleTemplate: 'video-{id}',
-    format: 'ts',
+    format: 'mp4',
     streamSave: false,
     concurrency: 4,
     downloadRangeMode: 'all'
@@ -371,7 +371,6 @@ const QUICK_DOWNLOAD_PARAM_NAMES = new Set([
     'experimental',
     '_ignore'
 ]);
-let experimentalMode = resolveExperimentalMode(globalThis.location?.search || '');
 
 let defaultTaskParams = loadDefaultTaskParams();
 
@@ -409,113 +408,11 @@ function hideAppLoaderAfterDebugDelay() {
     hideAppLoader();
 }
 
-function isExperimentalMode(search = '') {
-    try {
-        const value = new URLSearchParams(String(search || '')).get('experimental');
-        return value === '1' || value === 'true';
-    } catch {
-        return false;
-    }
-}
-
-function readExperimentalFeaturesEnabled() {
-    const rawValue = readLocalStorageValue(EXPERIMENTAL_FEATURES_STORAGE_KEY);
-    return rawValue === '1' || rawValue === 'true';
-}
-
-function writeExperimentalFeaturesEnabled(enabled) {
-    writeLocalStorageValue(EXPERIMENTAL_FEATURES_STORAGE_KEY, enabled ? '1' : '0');
-}
-
-function resolveExperimentalMode(search = '') {
-    // The URL flag remains parseable for old links, but the persisted setting is
-    // the required capability gate and cannot be bypassed by query parameters.
-    return readExperimentalFeaturesEnabled();
-}
-
-function setExperimentalMode(enabled) {
-    experimentalMode = Boolean(enabled);
-    syncExperimentalControls();
-    defaultTaskParams = loadDefaultTaskParams();
-    applyDefaultTaskParamsToSettingsForm();
-    applyDefaultTaskParamsToNewTaskForm();
-    renderDownloadRenditionOptions(pendingTaskDraft);
-    renderTasks();
-    syncActiveTaskDetails();
-    if (experimentalMode) void loadExperimentalRuntime();
-}
-
-function normalizeStableTaskDraft(draft, experimental = false) {
-    const normalized = { ...(draft || {}) };
-    if (experimental) return normalized;
-    // MP4 已作为稳定输出格式提供（普通 MPEG-TS 分片经 mux.js 转封装）；
-    // 稳定模式仅强制关闭边下边存并清空外部音轨/字幕选择。
-    return {
-        ...normalized,
-        streamSave: false,
-        selectedAudioRenditionId: '',
-        selectedAudioCodecFamily: '',
-        selectedSubtitleRenditionId: ''
-    };
-}
-
-function getStableTaskCompatibility(task, experimental = false) {
-    if (experimental) return { ok: true, reason: '', message: '' };
-    const segments = Array.isArray(task?.segments) ? task.segments : [];
-    if (task?.playlistContainer === 'fmp4' || segments.some(segment => segment?.container === 'fmp4')) {
-        return { ok: false, reason: 'experimental-fmp4', message: '当前任务使用 fMP4 分片，请在设置中开启实验功能（实验模式）后继续；历史记录和缓存已保留。' };
-    }
-    if (segments.some(segment => segment?.byteRange || segment?.initSegment?.byteRange)) {
-        return { ok: false, reason: 'experimental-byte-range', message: '当前任务使用 Byte Range 分片，请在设置中开启实验功能（实验模式）后继续；历史记录和缓存已保留。' };
-    }
-    if (task?.selectedAudioRenditionId || task?.selectedSubtitleRenditionId
-        || task?.selectedOutputMode === 'separate-renditions' || task?.actualOutputMode === 'separate-renditions') {
-        return { ok: false, reason: 'experimental-rendition', message: '当前任务包含外部音轨或字幕，请在设置中开启实验功能（实验模式）后继续；历史记录和缓存已保留。' };
-    }
-    if (task?.streamSave) {
-        return { ok: false, reason: 'experimental-stream-save', message: '边下边存需要实验模式，稳定模式请使用普通缓存下载。' };
-    }
-    return { ok: true, reason: '', message: '' };
-}
-
-function buildStableTsRecreationDraft(task) {
-    const originalTitle = String(task?.title || '').trim();
-    const requestedConcurrency = Number(task?.concurrency);
-    return {
-        url: String(task?.sourceUrl || task?.url || '').trim(),
-        title: originalTitle ? `${originalTitle}（TS）` : '',
-        format: 'ts',
-        streamSave: false,
-        concurrency: Number.isInteger(requestedConcurrency) && requestedConcurrency >= 1 && requestedConcurrency <= 8
-            ? requestedConcurrency
-            : 4,
-        downloadRangeMode: task?.downloadRangeMode === 'custom' ? 'custom' : 'all',
-        actualRangeStart: Number(task?.actualRangeStart) || 0,
-        actualRangeEnd: Number(task?.actualRangeEnd) || 0,
-        selectedQualityId: '',
-        selectedQualityLabel: '',
-        selectedAudioRenditionId: '',
-        selectedSubtitleRenditionId: '',
-        selectedOutputMode: 'single-video',
-        actualOutputMode: ''
-    };
-}
-
-function syncExperimentalControls() {
-    document.querySelectorAll('[data-experimental-only]').forEach(element => {
-        element.classList.toggle('hidden', !experimentalMode);
-    });
-    document.querySelectorAll('[data-experimental-control]').forEach(control => {
-        control.disabled = !experimentalMode;
-    });
-}
-
-let experimentalRuntimePromise = null;
-function loadExperimentalRuntime() {
-    if (!experimentalMode) return Promise.resolve(false);
+let streamSaverRuntimePromise = null;
+function loadStreamSaverRuntime() {
     if (globalThis.streamSaver?.createWriteStream) return Promise.resolve(true);
-    if (experimentalRuntimePromise) return experimentalRuntimePromise;
-    experimentalRuntimePromise = new Promise(resolve => {
+    if (streamSaverRuntimePromise) return streamSaverRuntimePromise;
+    streamSaverRuntimePromise = new Promise(resolve => {
         const script = document.createElement('script');
         script.src = 'vendor/streamsaver.js?v=202610150005';
         script.onload = () => {
@@ -525,7 +422,7 @@ function loadExperimentalRuntime() {
         script.onerror = () => resolve(false);
         document.head.appendChild(script);
     });
-    return experimentalRuntimePromise;
+    return streamSaverRuntimePromise;
 }
 
 function parseQuickDownloadParams(search = globalThis.location?.search || '') {
@@ -536,16 +433,10 @@ function parseQuickDownloadParams(search = globalThis.location?.search || '') {
     if (!params?.source) return null;
 
     const ignore = normalizeQuickDownloadIgnore(params.ignore);
-    const experimental = resolveExperimentalMode(search);
-    const stableModeDowngraded = !experimental
-        && (params.streamSave === true);
     return {
-        ...normalizeStableTaskDraft({
         ...params,
         ignore,
         source: removeIgnoredSourceParams(params.source, ignore)
-        }, experimental),
-        ...(stableModeDowngraded ? { stableModeDowngraded: true } : {})
     };
 }
 
@@ -824,8 +715,8 @@ function cleanupLegacySegmentCacheOnce() {
 
 async function init() {
     void cleanupLegacySegmentCacheOnce();
-    syncExperimentalControls();
-    applyTheme(currentTheme);
+    syncThemeWithSystem();
+    watchSystemTheme();
     applyDefaultTaskParamsToSettingsForm();
     resetNewTaskFormToDefaults();
     renderTasks();
@@ -1009,27 +900,6 @@ async function applyTaskAction(action) {
 
     const durable = findTaskById(taskId);
     if (!durable) return { ok: false, reason: 'task-not-found', taskId };
-    if (action.type === 'recreate_ts') {
-        const draft = buildTaskFromResolvedDraft(buildStableTsRecreationDraft(durable), null);
-        draft.id = createTaskId();
-        draft.sourceUrl = draft.url;
-        draft.queueOrder = currentTasks.reduce((maximum, task) => (
-            Math.max(maximum, Number(task.queueOrder) || 0)
-        ), 0) + 1;
-        draft.version = 1;
-        currentTasks.push(draft);
-        renderTasks();
-        showToast('已按 TS 普通缓存创建新任务', { type: 'info' });
-        scheduleNextQueuedTask();
-        return { ok: true, taskId: draft.id, value: draft, version: draft.version };
-    }
-    if (action.type !== 'pause') {
-        const compatibility = getStableTaskCompatibility(durable, experimentalMode);
-        if (!compatibility.ok) {
-            showToast(compatibility.message, { type: 'info' });
-            return { ok: false, reason: compatibility.reason, taskId };
-        }
-    }
 
     if (action.type.startsWith('select_')) {
         if (action.expectedVersion != null && Number(action.expectedVersion) !== Number(durable.version)) {
@@ -1050,8 +920,8 @@ async function applyTaskAction(action) {
             if (!quality) return { ok: false, reason: 'invalid-quality', taskId };
             const qualityBinding = resolveVideoRepresentationBinding(
                 quality,
-                experimentalMode ? payload.audioRenditionId : '',
-                experimentalMode ? payload.subtitleRenditionId : '',
+                payload.audioRenditionId,
+                payload.subtitleRenditionId,
                 durable.mediaRenditions
             );
             if (!qualityBinding) {
@@ -1063,8 +933,8 @@ async function applyTaskAction(action) {
                 playlistType: '',
                 selectedQualityId: quality.id,
                 selectedQualityLabel: quality.label,
-                selectedAudioRenditionId: experimentalMode ? (payload.audioRenditionId || '') : '',
-                selectedAudioCodecFamily: experimentalMode && payload.audioRenditionId
+                selectedAudioRenditionId: payload.audioRenditionId || '',
+                selectedAudioCodecFamily: payload.audioRenditionId
                     ? getAudioCodecFamily(
                         qualityBinding.codecs,
                         durable.mediaRenditions.find(rendition => (
@@ -1072,8 +942,8 @@ async function applyTaskAction(action) {
                         ))?.channels
                     )
                     : '',
-                selectedSubtitleRenditionId: experimentalMode ? (payload.subtitleRenditionId || '') : '',
-                selectedOutputMode: experimentalMode && (payload.audioRenditionId || payload.subtitleRenditionId)
+                selectedSubtitleRenditionId: payload.subtitleRenditionId || '',
+                selectedOutputMode: (payload.audioRenditionId || payload.subtitleRenditionId)
                     ? 'separate-renditions'
                     : 'single-video',
                 actualOutputMode: '',
@@ -1179,27 +1049,30 @@ function applyQuickDownloadFromLocation() {
 
     shouldSkipModalFallbackFocus = true;
     openModal('new-task');
-    if (params.stableModeDowngraded && !hasShownStableQuickDownloadDowngradeWarning) {
-        hasShownStableQuickDownloadDowngradeWarning = true;
-        showToast('快捷参数中的 MP4 或边下边存属于实验能力，本次已改为 TS 普通缓存。', { type: 'info' });
-    }
     return applyQuickDownloadParamsToNewTaskForm(params);
 }
 
-function applyTheme(theme) {
-    document.documentElement.setAttribute('data-theme', theme);
-    const themeBtn = document.getElementById('theme-toggle-btn');
-    if (themeBtn) {
-        const icon = theme === 'light' ? 'sun' : 'moon';
-        themeBtn.innerHTML = `<i data-lucide="${icon}"></i>`;
-        if (window.lucide) lucide.createIcons();
-    }
-    currentTheme = theme;
-    writeLocalStorageValue('theme', theme);
+function resolveSystemTheme() {
+    return systemThemeQuery?.matches ? 'dark' : 'light';
 }
 
-function toggleTheme() {
-    applyTheme(currentTheme === 'light' ? 'dark' : 'light');
+function applyTheme(theme) {
+    const nextTheme = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', nextTheme);
+}
+
+function syncThemeWithSystem() {
+    applyTheme(resolveSystemTheme());
+}
+
+function watchSystemTheme() {
+    if (!systemThemeQuery) return;
+    const handleThemeChange = () => syncThemeWithSystem();
+    if (typeof systemThemeQuery.addEventListener === 'function') {
+        systemThemeQuery.addEventListener('change', handleThemeChange);
+    } else if (typeof systemThemeQuery.addListener === 'function') {
+        systemThemeQuery.addListener(handleThemeChange);
+    }
 }
 
 function goHomeFromLogo(event) {
@@ -1841,7 +1714,7 @@ function warnIfBufferedMemoryThresholdExceeded() {
     if (snapshot.exceeded && !hasShownBufferedMemoryWarning) {
         hasShownBufferedMemoryWarning = true;
         showToast(
-            `当前下载已占用较多内存（约 ${formatStorageBytes(snapshot.usedBytes)}）。刷新或关闭页面会丢失未完成任务；大文件建议使用实验性的边下边存。`,
+            `当前下载已占用较多内存（约 ${formatStorageBytes(snapshot.usedBytes)}）。刷新或关闭页面会丢失未完成任务；大文件建议开启边下边存。`,
             { type: 'info', duration: 5000 }
         );
     }
@@ -1950,7 +1823,7 @@ function restoreFocusAfterBatchDelete() {
         return;
     }
 
-    const finalFallbackFocusTarget = document.getElementById('theme-toggle-btn');
+    const finalFallbackFocusTarget = document.getElementById('settings-btn');
     if (isFocusableElement(finalFallbackFocusTarget)) {
         finalFallbackFocusTarget.focus();
     }
@@ -2268,9 +2141,7 @@ function createTaskCardHTML(task) {
     const taskIdArgument = escapeHTML(JSON.stringify(String(task.id)));
     const taskSelectionControlId = escapeHTML(getTaskSelectionControlId(task.id));
     const taskUrlButtonId = escapeHTML(getTaskUrlButtonId(task.id));
-    const stableCompatibility = getStableTaskCompatibility(task, experimentalMode);
-    const shouldOfferStableTsRecreation = !experimentalMode && !stableCompatibility.ok;
-    const primaryActionLabel = shouldOfferStableTsRecreation ? '' : getTaskPrimaryActionLabel(task.status);
+    const primaryActionLabel = getTaskPrimaryActionLabel(task.status);
     const primaryActionIcon = ['paused', 'failed', 'recoverable', 'partial_completed'].includes(task.status)
         ? createTaskActionIcon('resume')
         : ['await_variant_selection', 'await_range_selection'].includes(task.status)
@@ -2285,15 +2156,9 @@ function createTaskCardHTML(task) {
     const primaryActionAccessibleLabel = escapeHTML(`${primaryActionLabel}任务 ${rawTitle}`);
     const playActionAccessibleLabel = escapeHTML(`播放任务 ${rawTitle}`);
     const hasCompletedExportData = task.status === 'completed' && hasCompletedTaskExportData(task);
-    const saveActionKind = shouldOfferStableTsRecreation
-        ? 'recreate-ts'
-        : (hasCompletedExportData ? 'save' : 'redownload');
-    const saveActionClassName = shouldOfferStableTsRecreation
-        ? 'task-recreate-ts-btn'
-        : (hasCompletedExportData ? 'task-save-btn' : 'task-redownload-btn');
-    const saveActionLabel = shouldOfferStableTsRecreation
-        ? '按 TS 重新创建'
-        : (hasCompletedExportData ? '重新保存' : '重新下载');
+    const saveActionKind = hasCompletedExportData ? 'save' : 'redownload';
+    const saveActionClassName = hasCompletedExportData ? 'task-save-btn' : 'task-redownload-btn';
+    const saveActionLabel = hasCompletedExportData ? '重新保存' : '重新下载';
     const saveActionAccessibleLabel = escapeHTML(`${saveActionLabel}任务 ${rawTitle}`);
     const mergeActionAccessibleLabel = escapeHTML(`强制合并任务 ${rawTitle}`);
     const deleteActionAccessibleLabel = escapeHTML(`删除任务 ${rawTitle}`);
@@ -2317,7 +2182,7 @@ function createTaskCardHTML(task) {
     const deleteActionFocusKey = escapeHTML(getTaskListFocusKey(task.id, 'delete'));
     const canForceMerge = canTaskRequestForceMerge(task);
     const hasForceMergeContent = countForceMergeAvailableSegments(task) > 0;
-    const shouldShowForceMergeAction = !task.streamSave
+    const shouldShowForceMergeAction = !canTaskUseStreamSave(task)
         && hasForceMergeContent
         && (canForceMerge || Boolean(mergeDisabledReason));
     const statusContent = createTaskStatusContent(task, statusLabel);
@@ -2340,7 +2205,7 @@ function createTaskCardHTML(task) {
     const forceMergeActionHTML = shouldShowForceMergeAction
         ? `<button type="button" class="task-action-btn task-merge-btn${canForceMerge ? '' : ' is-disabled'}" aria-label="${canForceMerge ? mergeActionAccessibleLabel : escapeHTML(`${mergeActionTooltip}任务 ${rawTitle}`)}" data-tooltip="${escapeHTML(mergeActionTooltip)}" data-tooltip-key="${mergeActionTooltipKey}" data-focus-key="${mergeActionFocusKey}" ${canForceMerge ? '' : 'aria-disabled="true" '}onpointerdown='handleTaskRowActionPointerDown(event, ${taskIdArgument}, "merge")' onkeydown='handleTaskRowActionKeydown(event, ${taskIdArgument}, "merge")'>${createTaskActionIcon('merge')}</button>`
         : '';
-    const saveActionHTML = task.status === 'completed' || shouldOfferStableTsRecreation
+    const saveActionHTML = task.status === 'completed'
         ? `<button type="button" class="task-action-btn ${saveActionClassName}" aria-label="${saveActionAccessibleLabel}" data-tooltip="${saveActionTooltip}" data-tooltip-key="${saveActionTooltipKey}" data-focus-key="${saveActionFocusKey}" onpointerdown='handleTaskRowActionPointerDown(event, ${taskIdArgument}, "${saveActionKind}")' onkeydown='handleTaskRowActionKeydown(event, ${taskIdArgument}, "${saveActionKind}")'>${createTaskActionIcon('save')}</button>`
         : '';
     const progressAccessibleLabel = escapeHTML(`查看任务 ${rawTitle} 的视频碎片详情`);
@@ -2870,9 +2735,7 @@ function renderTaskFragmentDetails(task) {
         ? `<p class="task-fragment-detail__quality">最近强制合并：${escapeHTML(getForceMergeModeLabel(safeTask.lastForceMergeSummary.mode))} · ${escapeHTML(safeTask.lastForceMergeSummary.segmentCount || 0)} 片</p>`
         : '';
     const rawTitle = safeTask.title || '未命名任务';
-    const stableCompatibility = getStableTaskCompatibility(safeTask, experimentalMode);
-    const shouldOfferStableTsRecreation = !experimentalMode && !stableCompatibility.ok;
-    const detailPrimaryActionLabel = shouldOfferStableTsRecreation ? '' : getTaskDetailPrimaryActionLabel(safeTask.status);
+    const detailPrimaryActionLabel = getTaskDetailPrimaryActionLabel(safeTask.status);
     const detailPrimaryActionIcon = detailPrimaryActionLabel === '暂停'
         ? 'pause'
         : detailPrimaryActionLabel === '确认范围'
@@ -2884,9 +2747,7 @@ function renderTaskFragmentDetails(task) {
         : '';
     const playAction = `<button type="button" class="task-fragment-detail__icon-btn" aria-label="${escapeHTML(`播放任务 ${rawTitle}`)}" data-tooltip="播放" onpointerdown='handleTaskDetailPlayPointerDown(event, ${taskIdArgument})' onkeydown='handleTaskDetailPlayKeydown(event, ${taskIdArgument})'>${createTaskActionIcon('play')}</button>`;
     const hasCompletedExportData = safeTask.status === 'completed' && hasCompletedTaskExportData(safeTask);
-    const saveAction = shouldOfferStableTsRecreation
-        ? `<button type="button" class="task-fragment-detail__icon-btn task-recreate-ts-btn" aria-label="${escapeHTML(`按 TS 重新创建任务 ${rawTitle}`)}" data-tooltip="按 TS 重新创建" onpointerdown='handleTaskRowActionPointerDown(event, ${taskIdArgument}, "recreate-ts")' onkeydown='handleTaskRowActionKeydown(event, ${taskIdArgument}, "recreate-ts")'>${createTaskActionIcon('save')}</button>`
-        : safeTask.status === 'completed'
+    const saveAction = safeTask.status === 'completed'
         ? hasCompletedExportData
             ? `<button type="button" class="task-fragment-detail__icon-btn task-fragment-detail__save-btn" aria-label="${escapeHTML(`重新保存任务 ${rawTitle}`)}" data-tooltip="重新保存" onpointerdown='handleTaskDetailSavePointerDown(event, ${taskIdArgument})' onkeydown='handleTaskDetailSaveKeydown(event, ${taskIdArgument})'>${createTaskActionIcon('save')}</button>`
             : `<button type="button" class="task-fragment-detail__icon-btn task-fragment-detail__redownload-btn" aria-label="${escapeHTML(`重新下载任务 ${rawTitle}`)}" data-tooltip="重新下载" onpointerdown='handleTaskDetailRedownloadPointerDown(event, ${taskIdArgument})' onkeydown='handleTaskDetailRedownloadKeydown(event, ${taskIdArgument})'>${createTaskActionIcon('save')}</button>`
@@ -3156,9 +3017,6 @@ function runTaskRowAction(id, action) {
     }
     if (action === 'redownload') {
         return submitTaskAction('redownload', id);
-    }
-    if (action === 'recreate-ts') {
-        return submitTaskAction('recreate_ts', id);
     }
     if (action === 'delete') {
         deleteTask(id);
@@ -4852,11 +4710,11 @@ function resetPendingTaskDraft() {
 }
 
 function buildTaskFromResolvedDraft(taskDraft, resolvedSource, range = null) {
-    taskDraft = normalizeStableTaskDraft(taskDraft, experimentalMode);
-    const taskParams = normalizeStableTaskDraft({
+    taskDraft = { ...(taskDraft || {}) };
+    const taskParams = {
         ...defaultTaskParams,
         ...taskDraft
-    }, experimentalMode);
+    };
     const taskId = Date.now().toString();
     const now = Date.now();
     const parsed = resolvedSource?.parsed ?? {};
@@ -4879,14 +4737,15 @@ function buildTaskFromResolvedDraft(taskDraft, resolvedSource, range = null) {
     const selectedAudioRenditionId = taskDraft.selectedAudioRenditionId || '';
     const selectedAudioCodecFamily = taskDraft.selectedAudioCodecFamily || '';
     const selectedSubtitleRenditionId = taskDraft.selectedSubtitleRenditionId || '';
+    const streamSaveEnabled = Boolean(taskParams.streamSave) && taskParams.format !== 'mp4';
     return {
         id: taskId,
         title,
         url: taskDraft.url,
         format: taskParams.format,
         duration: parsed.duration || '00:00:00',
-        streamSave: taskParams.streamSave,
-        saveTargetHandle: taskParams.streamSave ? (taskParams.saveTargetHandle || null) : null,
+        streamSave: streamSaveEnabled,
+        saveTargetHandle: streamSaveEnabled ? (taskParams.saveTargetHandle || null) : null,
         concurrency: taskParams.concurrency,
         downloadRangeMode: taskParams.downloadRangeMode,
         status: 'queued',
@@ -4915,8 +4774,8 @@ function buildTaskFromResolvedDraft(taskDraft, resolvedSource, range = null) {
             selectedSubtitleRenditionId
         }),
         activeOutputTrackKind: 'video',
-        selectedOutputMode: experimentalMode ? (taskDraft.selectedOutputMode || '') : 'single-video',
-        actualOutputMode: experimentalMode ? (taskDraft.actualOutputMode || '') : '',
+        selectedOutputMode: taskDraft.selectedOutputMode || 'single-video',
+        actualOutputMode: taskDraft.actualOutputMode || '',
         actualRangeStart,
         actualRangeEnd,
         recoveryMode: '',
@@ -5591,7 +5450,7 @@ function setDownloadOptionTabAvailability(option, isAvailable) {
     if (key === 'quality') return;
 
     const { tab, panel } = getDownloadOptionTabElements(key);
-    const shouldShow = experimentalMode && Boolean(isAvailable);
+    const shouldShow = Boolean(isAvailable);
     if (tab) {
         tab.classList.toggle('hidden', !shouldShow);
         tab.setAttribute('aria-hidden', String(!shouldShow));
@@ -5652,21 +5511,6 @@ function renderDownloadRenditionOptions(taskDraftOrTask, selectedQuality) {
     const outputHint = document.getElementById('download-rendition-output-hint');
 
     if (!audioSection || !audioList || !subtitleSection || !subtitleList || !outputHint) return;
-    if (!experimentalMode) {
-        audioSection.classList.toggle('hidden', true);
-        subtitleSection.classList.toggle('hidden', true);
-        audioList.innerHTML = '';
-        subtitleList.innerHTML = '';
-        outputHint.classList.toggle('hidden', true);
-        setDownloadOptionTabAvailability('audio', false);
-        setDownloadOptionTabAvailability('subtitle', false);
-        updateDownloadOptionTabsVisibility();
-        if (pendingTaskDraft) {
-            pendingTaskDraft.selectedAudioRenditionId = '';
-            pendingTaskDraft.selectedSubtitleRenditionId = '';
-        }
-        return;
-    }
 
     const quality = getSelectedDownloadQuality(taskDraftOrTask, selectedQuality);
     const matched = getMatchingMediaRenditions(quality, taskDraftOrTask?.mediaRenditions);
@@ -5954,7 +5798,7 @@ function getInjectScriptBaseUrl() {
 
 function buildCrossOriginInjectCode() {
     const base = getInjectScriptBaseUrl();
-    const scriptUrl = new URL('inject.js', base).href;
+    const scriptUrl = new URL('inject.js?v=202611040001', base).href;
     return '(function(){'
         + 'if(window.__m3u8InjectV2Loaded__){window.__m3u8InjectV2Show__&&window.__m3u8InjectV2Show__();return;}'
         + 'window.__M3U8_BASE__=' + JSON.stringify(base) + ';'
@@ -6017,9 +5861,7 @@ function setupEventListeners() {
         window.addEventListener('beforeunload', handleBeforeUnload);
     }
 
-    // Theme Toggle
-    const themeToggleBtn = document.getElementById('theme-toggle-btn');
-    if (themeToggleBtn) themeToggleBtn.addEventListener('click', toggleTheme);
+    // Theme follows the system color scheme; no manual toggle.
 
     const siteLogoLink = document.getElementById('site-logo-link');
     if (siteLogoLink) siteLogoLink.addEventListener('click', goHomeFromLogo);
@@ -6154,11 +5996,7 @@ function setupEventListeners() {
     const saveSettingsBtn = document.getElementById('save-settings-btn');
     if (saveSettingsBtn) {
         saveSettingsBtn.addEventListener('click', async () => {
-            const values = getSettingsFormValues();
-            const { experimentalFeaturesEnabled, ...taskParams } = values;
-            writeExperimentalFeaturesEnabled(experimentalFeaturesEnabled);
-            setExperimentalMode(experimentalFeaturesEnabled);
-            defaultTaskParams = normalizeStableTaskDraft(taskParams, experimentalMode);
+            defaultTaskParams = getSettingsFormValues();
             saveDefaultTaskParams(defaultTaskParams);
             applyDefaultTaskParamsToSettingsForm();
             if (!activeModalId) {
@@ -6359,7 +6197,7 @@ function restoreFocusBeforeModalHide() {
 
     if (shouldSkipModalFallbackFocus) return;
 
-    const fallbackFocusTarget = document.getElementById('theme-toggle-btn');
+    const fallbackFocusTarget = document.getElementById('settings-btn');
     if (isFocusableElement(fallbackFocusTarget)) {
         fallbackFocusTarget.focus();
     }
@@ -7428,17 +7266,6 @@ async function downloadMediaPlaylistTask(task) {
     }
 
     const mergedSegments = mergeResolvedMediaSegments(task.segments, parsed.segments);
-    const compatibility = getStableTaskCompatibility({ ...task,
-        playlistContainer: String(parsed.container || task.playlistContainer || ''), segments: mergedSegments
-    }, experimentalMode);
-    if (!compatibility.ok) {
-        const paused = updateTask(task.id, current => ({ ...current, status: 'paused',
-            playlistType: 'media', playlistContainer: String(parsed.container || ''),
-            segmentCount: parsed.segments.length, segments: mergedSegments, errorMessage: compatibility.message
-        }));
-        showToast(compatibility.message, { type: 'info' });
-        return paused;
-    }
     const resolvedRangeTask = {
         ...task,
         segments: mergedSegments
@@ -7549,7 +7376,7 @@ function canUseFileSystemStreamSave() {
 }
 
 async function pickNewTaskSaveTarget(taskDraft) {
-    if (!experimentalMode || !taskDraft?.streamSave || !canUseFileSystemStreamSave()) {
+    if (!canUseFileSystemStreamSave() || !canTaskUseStreamSave(taskDraft)) {
         return { ok: true, taskDraft };
     }
 
@@ -7603,7 +7430,7 @@ async function selectTaskSaveTarget(taskId) {
 }
 
 async function createTaskStreamWriter(task) {
-    if (!experimentalMode || !task?.streamSave || isFmp4Task(task)) {
+    if (!canTaskUseStreamSave(task)) {
         return null;
     }
     const assertCurrent = typeof createTaskExecutionGuard === 'function' ? createTaskExecutionGuard(task) : () => {};
@@ -7616,7 +7443,7 @@ async function createTaskStreamWriter(task) {
 
     const outputFileName = buildTaskOutputFileName(task);
     if (!task.saveTargetHandle && !canUseFileSystemStreamSave()) {
-        await loadExperimentalRuntime();
+        await loadStreamSaverRuntime();
         if (!canUseStreamSaverStreamSave()) {
             return null;
         }
@@ -8059,7 +7886,7 @@ async function downloadTaskSegments(task) {
                 return Number.isFinite(sequence) && sequence >= start && sequence <= end;
             });
         })();
-    const needsStreamReplay = Boolean(task.streamSave && !isFmp4Task(task));
+    const needsStreamReplay = canTaskUseStreamSave(task);
     const activeRecoverySegments = effectiveSegments.filter(segment => (
         getRecoverySegmentEligibility(task, segment)
         && (!hasCompletedSegment(segment) || (needsStreamReplay && !segment.streamSaved))
@@ -8109,7 +7936,10 @@ async function downloadTaskSegments(task) {
     let nextSegmentIndex = 0;
     let hasFailure = false;
     const canUseTaskStreamSave = canTaskUseStreamSave(task);
-    const isFmp4StreamSaveDowngrade = Boolean(task.streamSave && isFmp4Task(task) && !canUseTaskStreamSave);
+    const streamSaveBlockReason = !task.streamSave
+        ? ''
+        : isFmp4Task(task) ? 'fmp4' : (task.format === 'mp4' ? 'mp4' : '');
+    const isFmp4StreamSaveDowngrade = Boolean(task.streamSave && streamSaveBlockReason && !canUseTaskStreamSave);
     const hasSelectedExternalRenditions = Boolean(task.selectedAudioRenditionId || task.selectedSubtitleRenditionId);
     const runFileSelection = typeof enqueueFileSelection === 'function'
         ? enqueueFileSelection
@@ -8145,9 +7975,11 @@ async function downloadTaskSegments(task) {
     }
     if (isFmp4StreamSaveDowngrade && !task.streamSaveFmp4DowngradeNotified) {
         showToast(
-            hasSelectedExternalRenditions
-                ? '已选择外部音轨或字幕，本次将分别缓存后保存；直接打开视频可能无声。'
-                : 'fMP4 将先缓存后保存，暂不使用边下边存。',
+            streamSaveBlockReason === 'mp4'
+                ? 'MP4 输出需要先缓存再转封装，本次不使用边下边存。'
+                : hasSelectedExternalRenditions
+                    ? '已选择外部音轨或字幕，本次将分别缓存后保存；直接打开视频可能无声。'
+                    : 'fMP4 将先缓存后保存，暂不使用边下边存。',
             { type: 'info' }
         );
         task.streamSaveFmp4DowngradeNotified = true;
@@ -8634,6 +8466,10 @@ function normalizeForceMergeModeForTask(task, mode) {
 
 function canTaskUseStreamSave(task) {
     if (isFmp4Task(task)) {
+        return false;
+    }
+    // MP4 输出需要在全部缓存完成后经 mux.js 转封装，无法边下边存。
+    if (task?.format === 'mp4') {
         return false;
     }
     return Boolean(task?.streamSave);
@@ -10195,12 +10031,6 @@ async function startTaskExecution(taskId, runToken = null) {
         }
 
         let task = initialTask;
-        const compatibility = getStableTaskCompatibility(initialTask, experimentalMode);
-        if (!compatibility.ok) {
-            const paused = updateTask(taskId, current => ({ ...current, status: 'paused', errorMessage: compatibility.message }));
-            showToast(compatibility.message, { type: 'info' });
-            return paused;
-        }
         if (isTaskMissingRecoveryContext(initialTask)) {
             return failTask(taskId, RECOVERY_CONTEXT_INCOMPLETE_ERROR);
         }
@@ -10711,21 +10541,21 @@ async function retryTaskSegment(taskId, sequence) {
 function loadDefaultTaskParams() {
     try {
         const rawValue = readLocalStorageValue(DEFAULT_TASK_PARAMS_STORAGE_KEY);
-        if (!rawValue) return normalizeStableTaskDraft(DEFAULT_TASK_PARAMS, experimentalMode);
+        if (!rawValue) return { ...DEFAULT_TASK_PARAMS };
         const parsed = JSON.parse(rawValue);
-        return normalizeStableTaskDraft({
+        return {
             titleTemplate: typeof parsed.titleTemplate === 'string' && parsed.titleTemplate.trim()
                 ? parsed.titleTemplate
                 : DEFAULT_TASK_PARAMS.titleTemplate,
-            format: parsed.format === 'mp4' ? 'mp4' : DEFAULT_TASK_PARAMS.format,
+            format: parsed.format === 'ts' || parsed.format === 'mp4' ? parsed.format : DEFAULT_TASK_PARAMS.format,
             streamSave: typeof parsed.streamSave === 'boolean'
                 ? parsed.streamSave
                 : DEFAULT_TASK_PARAMS.streamSave,
             concurrency: normalizeConcurrency(parsed.concurrency),
             downloadRangeMode: parsed.downloadRangeMode === 'custom' ? 'custom' : DEFAULT_TASK_PARAMS.downloadRangeMode
-        }, experimentalMode);
+        };
     } catch {
-        return normalizeStableTaskDraft(DEFAULT_TASK_PARAMS, experimentalMode);
+        return { ...DEFAULT_TASK_PARAMS };
     }
 }
 
@@ -10746,7 +10576,6 @@ function getRequiredElement(id) {
 
 function getSettingsFormElements() {
     return {
-        experimentalFeatures: getRequiredElement('setting-experimental-features'),
         titleTemplate: getRequiredElement('setting-title-tpl'),
         format: getRequiredElement('setting-format'),
         streamSave: getRequiredElement('setting-stream-save'),
@@ -10765,7 +10594,6 @@ function getNewTaskFormElements() {
 
 function applyDefaultTaskParamsToSettingsForm() {
     const form = getSettingsFormElements();
-    form.experimentalFeatures.checked = experimentalMode;
     form.titleTemplate.value = defaultTaskParams.titleTemplate;
     form.format.value = defaultTaskParams.format;
     form.streamSave.checked = defaultTaskParams.streamSave;
@@ -10792,22 +10620,18 @@ function resetNewTaskFormToDefaults() {
 
 function getSettingsFormValues() {
     const form = getSettingsFormElements();
-    const experimentalFeaturesEnabled = Boolean(form.experimentalFeatures.checked);
     return {
-        ...normalizeStableTaskDraft({
-            titleTemplate: form.titleTemplate.value.trim() || DEFAULT_TASK_PARAMS.titleTemplate,
-            format: form.format.value,
-            streamSave: form.streamSave.checked,
-            concurrency: normalizeConcurrency(form.concurrency.value),
-            downloadRangeMode: defaultTaskParams.downloadRangeMode
-        }, experimentalFeaturesEnabled),
-        experimentalFeaturesEnabled
+        titleTemplate: form.titleTemplate.value.trim() || DEFAULT_TASK_PARAMS.titleTemplate,
+        format: form.format.value === 'ts' ? 'ts' : 'mp4',
+        streamSave: form.streamSave.checked,
+        concurrency: normalizeConcurrency(form.concurrency.value),
+        downloadRangeMode: defaultTaskParams.downloadRangeMode
     };
 }
 
 function getNewTaskFormValues() {
     const form = getNewTaskFormElements();
-    const taskDraft = {
+    return {
         url: form.url.value.trim(),
         title: form.title.value.trim(),
         format: getSelectedNewTaskFormat(),
@@ -10815,7 +10639,6 @@ function getNewTaskFormValues() {
         concurrency: normalizeConcurrency(form.concurrency.value),
         downloadRangeMode: getSelectedNewTaskRangeMode()
     };
-    return normalizeStableTaskDraft(taskDraft, experimentalMode);
 }
 
 function getValidatedNewTaskDraft() {
@@ -10841,7 +10664,7 @@ function getSelectedNewTaskRangeMode() {
 
 function getSelectedNewTaskFormat() {
     const selectedControl = document.querySelector('input[name="new-format"]:checked');
-    return selectedControl?.value === 'mp4' ? 'mp4' : 'ts';
+    return selectedControl?.value === 'ts' ? 'ts' : DEFAULT_TASK_PARAMS.format;
 }
 
 function setSelectedNewTaskFormat(format) {

@@ -9,7 +9,18 @@
     <meta name="author" content="getm3u8.com">
     <meta name="application-version" content="v1.3.0">
     <meta name="robots" content="index, follow">
-    <meta name="theme-color" content="#26282b">
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#26282b" media="(prefers-color-scheme: dark)">
+    <script>
+        (function () {
+            try {
+                var query = window.matchMedia('(prefers-color-scheme: dark)');
+                document.documentElement.setAttribute('data-theme', query.matches ? 'dark' : 'light');
+            } catch (error) {
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+        })();
+    </script>
     <link rel="canonical" href="https://getm3u8.com/">
     <meta property="og:title" content="M3U8下载">
     <meta property="og:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线预览、AES-128、TS 保存、范围下载和页面内任务控制。">
@@ -18,14 +29,14 @@
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="M3U8下载">
     <meta name="twitter:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线播放、分片下载、解密、保存和恢复。">
-    <link rel="icon" href="favicon.svg?v=202610150005" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=202610150005">
+    <link rel="icon" href="favicon.svg?v=202611040001" type="image/svg+xml">
+    <link rel="stylesheet" href="style.css?v=202611040001">
     <!-- Lucide Icons (local vendor bundle) -->
-    <script src="vendor/lucide.min.js?v=202610150005"></script>
+    <script src="vendor/lucide.min.js?v=202611040001"></script>
     <!-- HLS preview runtime (local vendor bundle) -->
-    <script src="vendor/hls.min.js?v=202610150005"></script>
+    <script src="vendor/hls.min.js?v=202611040001"></script>
     <!-- TS to MP4 transmux runtime (local vendor bundle) -->
-    <script src="vendor/mux.min.js?v=202610150005"></script>
+    <script src="vendor/mux.min.js?v=202611040001"></script>
 </head>
 <body>
     <div id="app-loader" class="app-loader" aria-hidden="true"></div>
@@ -37,9 +48,6 @@
                     <h1>M3U8下载</h1>
                 </a>
                 <div class="header-actions">
-                    <button id="theme-toggle-btn" class="icon-btn" data-tooltip="切换主题" aria-label="切换主题">
-                        <i data-lucide="sun"></i>
-                    </button>
                     <button id="settings-btn" class="icon-btn" data-tooltip="设置" aria-label="设置">
                         <i data-lucide="settings"></i>
                     </button>
@@ -153,24 +161,24 @@
                         <label>保存格式</label>
                         <div class="form-choice-group" role="radiogroup" aria-label="保存格式">
                             <label class="form-choice" for="new-format-ts">
-                                <input type="radio" id="new-format-ts" name="new-format" value="ts" checked>
+                                <input type="radio" id="new-format-ts" name="new-format" value="ts">
                                 <span class="form-choice-indicator" aria-hidden="true"></span>
                                 <span>TS</span>
                             </label>
                             <label class="form-choice" for="new-format-mp4">
-                                <input type="radio" id="new-format-mp4" name="new-format" value="mp4">
+                                <input type="radio" id="new-format-mp4" name="new-format" value="mp4" checked>
                                 <span class="form-choice-indicator" aria-hidden="true"></span>
                                 <span>MP4</span>
                             </label>
                         </div>
                     </div>
-                    <div class="form-item hidden" data-experimental-only>
+                    <div class="form-item">
                         <label for="new-stream-save">保存模式</label>
                         <label class="form-checkbox" for="new-stream-save">
-                            <input type="checkbox" id="new-stream-save" data-experimental-control>
-                            <span>边下边存（实验）</span>
+                            <input type="checkbox" id="new-stream-save">
+                            <span>边下边存</span>
                         </label>
-                        <p class="form-help">开启后会在下载过程中尽量直接写入文件，减少一次性内存占用；浏览器不支持时会自动降级。</p>
+                        <p class="form-help">开启后会在下载过程中尽量直接写入文件，减少一次性内存占用；仅用于 TS 格式，MP4 需缓存后转封装，浏览器不支持时会自动降级。</p>
                     </div>
                     <div class="form-item">
                         <label for="new-concurrency">并发数</label>
@@ -196,8 +204,8 @@
                 <div class="modal-body">
                     <div id="download-option-tabs" class="download-option-tabs" role="tablist" aria-label="下载选项">
                         <button class="download-option-tab is-active" type="button" role="tab" aria-selected="true" data-download-option-tab="quality" data-download-option-panel="download-quality-panel">分辨率</button>
-                        <button class="download-option-tab hidden" type="button" role="tab" aria-selected="false" data-download-option-tab="audio" data-download-option-panel="download-audio-rendition-panel" data-experimental-only>音轨（实验）</button>
-                        <button class="download-option-tab hidden" type="button" role="tab" aria-selected="false" data-download-option-tab="subtitle" data-download-option-panel="download-subtitle-rendition-panel" data-experimental-only>字幕（实验）</button>
+                        <button class="download-option-tab hidden" type="button" role="tab" aria-selected="false" data-download-option-tab="audio" data-download-option-panel="download-audio-rendition-panel">音轨</button>
+                        <button class="download-option-tab hidden" type="button" role="tab" aria-selected="false" data-download-option-tab="subtitle" data-download-option-panel="download-subtitle-rendition-panel">字幕</button>
                     </div>
                     <section id="download-quality-panel" class="download-option-panel" data-download-option-panel="quality">
                         <p id="download-quality-empty" class="form-note hidden">暂无可选清晰度，请返回检查播放列表内容。</p>
@@ -213,13 +221,13 @@
                             </label>
                         </div>
                     </section>
-                    <section id="download-audio-rendition-panel" class="download-option-panel hidden" data-download-option-panel="audio" data-experimental-only>
+                    <section id="download-audio-rendition-panel" class="download-option-panel hidden" data-download-option-panel="audio">
                         <section id="download-audio-rendition-section" class="download-rendition-section hidden">
                             <h4>音轨</h4>
                             <div id="download-audio-rendition-list" class="download-rendition-list" role="radiogroup" aria-label="下载音轨列表"></div>
                         </section>
                     </section>
-                    <section id="download-subtitle-rendition-panel" class="download-option-panel hidden" data-download-option-panel="subtitle" data-experimental-only>
+                    <section id="download-subtitle-rendition-panel" class="download-option-panel hidden" data-download-option-panel="subtitle">
                         <section id="download-subtitle-rendition-section" class="download-rendition-section hidden">
                             <h4>字幕</h4>
                             <div id="download-subtitle-rendition-list" class="download-rendition-list" role="radiogroup" aria-label="下载字幕列表"></div>
@@ -352,31 +360,23 @@
                     <button class="close-modal-btn modal-close-btn"><i data-lucide="x"></i></button>
                 </div>
                 <div class="modal-body">
-                    <div class="form-item settings-experimental-toggle">
-                        <label for="setting-experimental-features">实验功能</label>
-                        <label class="form-checkbox" for="setting-experimental-features">
-                            <input type="checkbox" id="setting-experimental-features">
-                            <span>启用实验功能（非稳定）</span>
-                        </label>
-                        <p class="form-help">开启后可使用 fMP4/Byte Range、外部音轨或字幕及边下边存；这些能力受浏览器、编码和安全上下文影响。TS 与 MP4 输出已稳定提供，无需开启。</p>
-                    </div>
                     <div class="form-item">
                         <label for="setting-title-tpl">保存标题模板</label>
                         <input type="text" id="setting-title-tpl" placeholder="video-{id}">
                     </div>
-                    <div class="form-item hidden" data-experimental-only>
+                    <div class="form-item">
                         <label for="setting-stream-save">保存模式</label>
                         <label class="form-checkbox" for="setting-stream-save">
-                            <input type="checkbox" id="setting-stream-save" data-experimental-control>
-                            <span>边下边存（实验）</span>
+                            <input type="checkbox" id="setting-stream-save">
+                            <span>边下边存</span>
                         </label>
-                        <p class="form-help">作为默认偏好，新建任务时会自动带入；浏览器不支持时会自动降级。</p>
+                        <p class="form-help">作为默认偏好，新建任务时会自动带入；仅对 TS 格式生效，浏览器不支持时会自动降级。</p>
                     </div>
                     <div class="form-item">
                         <label for="setting-format">保存格式</label>
                         <select id="setting-format">
-                            <option value="ts">TS</option>
                             <option value="mp4">MP4</option>
+                            <option value="ts">TS</option>
                         </select>
                     </div>
                     <div class="form-item">
@@ -405,7 +405,7 @@
                             <h4><i data-lucide="rocket" aria-hidden="true"></i>快速开始</h4>
                             <ol>
                                 <li>点击“新建下载”，粘贴 m3u8 地址。</li>
-                                <li>按需填写保存标题、下载范围和分片并发数；可选保存为 TS 或 MP4。</li>
+                                <li>按需填写保存标题、下载范围和分片并发数；默认保存为 MP4，也可切换为 TS。</li>
                                 <li>点击“开始下载”，如存在多个清晰度，先选择分辨率。</li>
                                 <li>下载完成后，浏览器会保存对应的视频文件。</li>
                             </ol>
@@ -427,7 +427,7 @@
                                 <li>范围下载会在解析出真实分片后确认起止片号。</li>
                                 <li>普通下载分片保存在当前页面内存；占用较高时只提示一次，不会自动暂停。</li>
                                 <li>MP4 输出通过 mux.js 将普通 TS 分片转封装；遇到不兼容编码时请改用 TS。</li>
-                                <li>fMP4、外部音轨/字幕和边下边存仅供实验验证，可在“设置”中开启，不属于稳定支持。</li>
+                                <li>fMP4、Byte Range、外部音轨/字幕和边下边存均已作为常规能力提供。</li>
                                 <li>强制合并只导出从范围起点开始连续成功的本地分片。</li>
                                 <li>点击任务进度条可查看分片状态，失败分片可点击重试。</li>
                                 <li>源站禁止跨域时：点击“复制跨域代码”→ 在视频源站按 F12 打开控制台 → 粘贴执行 → 页面出现注入下载面板，在同源上下文下载分片，绕过跨域限制。</li>
@@ -438,8 +438,7 @@
                             <ul>
                                 <li><code>source</code>：m3u8 地址，推荐 URL 编码。</li>
                                 <li><code>title</code>：预填保存标题。</li>
-                                <li><code>format</code>：<code>ts</code> 或 <code>mp4</code>，默认 <code>ts</code>。</li>
-                                <li><code>experimental</code>：旧链接兼容参数，不会绕过“设置”中的实验功能开关。</li>
+                                <li><code>format</code>：<code>ts</code> 或 <code>mp4</code>，默认 <code>mp4</code>。</li>
                                 <li><code>range</code>：<code>all</code> 或 <code>custom</code>。</li>
                                 <li><code>concurrency</code>：分片并发数，范围 1-8。</li>
                                 <li><code>_ignore</code>：从 source 内部移除指定参数。</li>
@@ -448,7 +447,7 @@
                     </div>
                     <div class="help-modal__example" aria-label="快捷下载示例">
                         <span>示例：</span>
-                        <code>https://getm3u8.com?source=https%3A%2F%2Fexample.com%2Fvideo.m3u8&amp;title=demo&amp;format=ts</code>
+                        <code>https://getm3u8.com?source=https%3A%2F%2Fexample.com%2Fvideo.m3u8&amp;title=demo&amp;format=mp4</code>
                     </div>
                     <div class="help-modal__feedback" aria-label="联系与反馈">
                         <div>
@@ -476,6 +475,6 @@
         </div>
         <div id="app-tooltip" class="app-tooltip" aria-hidden="true"></div>
     </div>
-    <script src="app.js?v=202610150005"></script>
+    <script src="app.js?v=202611040001"></script>
 </body>
 </html>

@@ -214,7 +214,7 @@
             '<div class="m3u8-inject-head"><span class="t">M3U8 注入下载</span><span class="x" title="关闭">×</span></div>' +
             '<div class="m3u8-inject-body">' +
             '<div class="m3u8-inject-row"><label class="m3u8-inject-label">m3u8 地址</label><input class="m3u8-inject-input" type="text" placeholder="https://.../index.m3u8"></div>' +
-            '<div class="m3u8-inject-row"><label class="m3u8-inject-label">保存格式</label><div class="m3u8-inject-formats"><span class="m3u8-inject-fmt on" data-fmt="ts">TS</span><span class="m3u8-inject-fmt" data-fmt="mp4">MP4</span></div></div>' +
+            '<div class="m3u8-inject-row"><label class="m3u8-inject-label">保存格式</label><div class="m3u8-inject-formats"><span class="m3u8-inject-fmt" data-fmt="ts">TS</span><span class="m3u8-inject-fmt on" data-fmt="mp4">MP4</span></div></div>' +
             '<button class="m3u8-inject-btn">开始下载</button>' +
             '<div class="m3u8-inject-progress"><div class="bar"></div></div>' +
             '<div class="m3u8-inject-status">就绪</div>' +
@@ -229,7 +229,7 @@
         var status = panel.querySelector('.m3u8-inject-status');
         var closeBtn = panel.querySelector('.m3u8-inject-head .x');
 
-        var format = 'ts';
+        var format = 'mp4';
         fmtEls.forEach(function (el) {
             el.addEventListener('click', function () {
                 fmtEls.forEach(function (e) { e.classList.remove('on'); });

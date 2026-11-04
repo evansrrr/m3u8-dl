@@ -4,20 +4,20 @@
 
 基于 [caiweiming/get-m3u8](https://github.com/caiweiming/get-m3u8)（MIT）修改，做了以下增强：
 
-- **TS + MP4 双格式稳定输出**：MP4 由 mux.js 在浏览器内转封装，与 TS 并列可选，无需开启实验模式。
+- **MP4 / TS 双格式输出**：默认保存为 MP4（mux.js 在浏览器内转封装），也可切换为 TS，全部能力默认可用。
 - **控制台注入跨域方案**：遇到源站禁止跨域时，复制一段代码到视频源站 F12 控制台执行，下载器注入源站同源上下文，绕过 CORS 限制。
-- **柔和黑白配色**：简洁干净的极简界面，默认浅色，支持深色主题。
+- **柔和黑白配色**：简洁干净的极简界面，主题自动跟随系统深浅色。
 
 ## 功能
 
 - 解析媒体播放列表与多清晰度（master）播放列表，可选分辨率。
 - 在线预览播放，支持外部音轨与 WebVTT 字幕。
 - 支持 AES-128 加密分片解密。
-- 输出 TS（分片直接拼接，最稳定）或 MP4（mux.js 转封装）。
+- 输出 MP4（默认，mux.js 转封装）或 TS（分片直接拼接）。
 - 全部下载 / 按分片序号指定范围下载。
 - 任务 FIFO 队列，单任务分片并发 1–8（默认 4），显示速度与进度。
 - 分片级失败重试、连续前缀强制合并导出。
-- 快捷下载 URL 参数（`?source=...&format=ts&concurrency=4` 等）。
+- 快捷下载 URL 参数（`?source=...&format=mp4&concurrency=4` 等）。
 
 ## 使用
 
@@ -76,7 +76,7 @@ python -m http.server 4173
 | --- | --- | --- | --- | --- |
 | hls.js | `vendor/hls.min.js` | 1.6.16 | Apache-2.0 | 预览播放 |
 | mux.js | `vendor/mux.min.js` | 6.3.0 | Apache-2.0 | TS→MP4 转封装 |
-| StreamSaver | `vendor/streamsaver*.js` | 2.0.5 | MIT | 边下边存（实验） |
+| StreamSaver | `vendor/streamsaver*.js` | 2.0.5 | MIT | 边下边存 |
 | Lucide | `vendor/lucide.min.js` | 0.321.0 | ISC | 图标 |
 
 本项目业务代码沿用上游 **MIT License**（见 `LICENSE`）。
