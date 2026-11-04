@@ -393,19 +393,174 @@
         });
     }
 
+    // mux.js 依赖分片 PTS 连续；源站 PTS 回跳时它会按 +2^33 修正，
+    // 导致导出 MP4 时长多出几十小时。这里按样本时长重建时间轴并修正异常样本时长。
+    function readMp4Boxes(view, bytes, start, end) {
+        var boxes = [];
+        var offset = start;
+        while (offset + 8 <= end) {
+            var size = view.getUint32(offset);
+            var type = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+            var headerSize = 8;
+            if (size === 1 && offset + 16 <= end) {
+                size = Number(view.getBigUint64(offset + 8));
+                headerSize = 16;
+            } else if (size === 0) {
+                size = end - offset;
+            }
+            if (size < headerSize || offset + size > end) break;
+            boxes.push({ type: type, payload: offset + headerSize, end: offset + size });
+            offset += size;
+        }
+        return boxes;
+    }
+
+    function writeMp4Uint64(view, offset, value) {
+        var normalized = Math.max(0, Math.round(value));
+        view.setUint32(offset, Math.floor(normalized / 4294967296));
+        view.setUint32(offset + 4, normalized >>> 0);
+    }
+
+    function createMp4TimebaseNormalizer(initSegment) {
+        var bytes = initSegment;
+        var view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        var tracks = new Map();
+        var movieTimescale = 1000;
+        var movieHeader = null;
+
+        readMp4Boxes(view, bytes, 0, bytes.length).forEach(function (box) {
+            if (box.type !== 'moov') return;
+            readMp4Boxes(view, bytes, box.payload, box.end).forEach(function (child) {
+                if (child.type === 'mvhd') {
+                    var version = bytes[child.payload];
+                    movieTimescale = view.getUint32(child.payload + (version === 1 ? 20 : 12)) || 1000;
+                    movieHeader = { version: version, offset: child.payload + (version === 1 ? 24 : 16) };
+                } else if (child.type === 'trak') {
+                    var trackId = 0;
+                    var timescale = 90000;
+                    var mediaHeader = null;
+                    var trackHeader = null;
+                    readMp4Boxes(view, bytes, child.payload, child.end).forEach(function (part) {
+                        if (part.type === 'tkhd') {
+                            var tkhdVersion = bytes[part.payload];
+                            trackId = view.getUint32(part.payload + (tkhdVersion === 1 ? 20 : 12));
+                            trackHeader = { version: tkhdVersion, offset: part.payload + (tkhdVersion === 1 ? 28 : 20) };
+                        } else if (part.type === 'mdia') {
+                            readMp4Boxes(view, bytes, part.payload, part.end).forEach(function (media) {
+                                if (media.type !== 'mdhd') return;
+                                var mdhdVersion = bytes[media.payload];
+                                timescale = view.getUint32(media.payload + (mdhdVersion === 1 ? 20 : 12)) || timescale;
+                                mediaHeader = { version: mdhdVersion, offset: media.payload + (mdhdVersion === 1 ? 24 : 16) };
+                            });
+                        }
+                    });
+                    if (trackId) tracks.set(trackId, { timescale: timescale, mediaHeader: mediaHeader, trackHeader: trackHeader, cursor: 0 });
+                }
+            });
+        });
+
+        return { bytes: bytes, view: view, tracks: tracks, movieTimescale: movieTimescale, movieHeader: movieHeader };
+    }
+
+    function normalizeMp4FragmentTimebase(normalizer, fragment) {
+        var bytes = fragment;
+        var view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        readMp4Boxes(view, bytes, 0, bytes.length).forEach(function (moof) {
+            if (moof.type !== 'moof') return;
+            readMp4Boxes(view, bytes, moof.payload, moof.end).forEach(function (traf) {
+                if (traf.type !== 'traf') return;
+                var trackId = 0;
+                var baseMediaDecodeTime = null;
+                var sampleDurations = [];
+                readMp4Boxes(view, bytes, traf.payload, traf.end).forEach(function (box) {
+                    if (box.type === 'tfhd') {
+                        trackId = view.getUint32(box.payload + 4);
+                    } else if (box.type === 'tfdt') {
+                        baseMediaDecodeTime = { version: bytes[box.payload], offset: box.payload + 4 };
+                    } else if (box.type === 'trun') {
+                        var flags = view.getUint32(box.payload) & 0xffffff;
+                        if (!(flags & 0x100)) return;
+                        var sampleCount = view.getUint32(box.payload + 4);
+                        var cursor = box.payload + 8;
+                        if (flags & 0x1) cursor += 4;
+                        if (flags & 0x4) cursor += 4;
+                        var stride = 4 + ((flags & 0x200) ? 4 : 0) + ((flags & 0x400) ? 4 : 0) + ((flags & 0x800) ? 4 : 0);
+                        for (var index = 0; index < sampleCount; index += 1) {
+                            sampleDurations.push({ offset: cursor, value: view.getUint32(cursor) });
+                            cursor += stride;
+                        }
+                    }
+                });
+
+                var track = normalizer.tracks.get(trackId);
+                if (!track || !baseMediaDecodeTime) return;
+                if (sampleDurations.length > 3) {
+                    var sorted = sampleDurations.slice().map(function (sample) { return sample.value; }).sort(function (left, right) { return left - right; });
+                    var median = sorted[Math.floor(sorted.length / 2)];
+                    var maxAllowed = Math.max(median * 8, Math.round(track.timescale * 0.5));
+                    if (median > 0) {
+                        sampleDurations.forEach(function (sample) {
+                            if (sample.value <= maxAllowed) return;
+                            sample.value = median;
+                            view.setUint32(sample.offset, median);
+                        });
+                    }
+                }
+
+                var duration = 0;
+                sampleDurations.forEach(function (sample) { duration += sample.value; });
+
+                if (baseMediaDecodeTime.version === 1) writeMp4Uint64(view, baseMediaDecodeTime.offset, track.cursor);
+                else view.setUint32(baseMediaDecodeTime.offset, track.cursor >>> 0);
+                track.cursor += duration;
+            });
+        });
+    }
+
+    function finalizeMp4Timebase(normalizer) {
+        var longestSeconds = 0;
+        normalizer.tracks.forEach(function (track) {
+            var seconds = track.cursor / track.timescale;
+            longestSeconds = Math.max(longestSeconds, seconds);
+            if (track.mediaHeader) {
+                if (track.mediaHeader.version === 1) writeMp4Uint64(normalizer.view, track.mediaHeader.offset, track.cursor);
+                else normalizer.view.setUint32(track.mediaHeader.offset, track.cursor >>> 0);
+            }
+            if (track.trackHeader) {
+                var movieTicks = Math.round(seconds * normalizer.movieTimescale);
+                if (track.trackHeader.version === 1) writeMp4Uint64(normalizer.view, track.trackHeader.offset, movieTicks);
+                else normalizer.view.setUint32(track.trackHeader.offset, movieTicks >>> 0);
+            }
+        });
+        if (normalizer.movieHeader) {
+            var totalTicks = Math.round(longestSeconds * normalizer.movieTimescale);
+            if (normalizer.movieHeader.version === 1) writeMp4Uint64(normalizer.view, normalizer.movieHeader.offset, totalTicks);
+            else normalizer.view.setUint32(normalizer.movieHeader.offset, totalTicks >>> 0);
+        }
+        return longestSeconds;
+    }
+
     async function transmuxToMp4(parts) {
         var muxjs = await loadMux();
         var Transmuxer = muxjs.mp4.Transmuxer;
         var out = [];
+        var normalizer = null;
         var transmuxer = new Transmuxer();
         transmuxer.on('data', function (seg) {
-            if (seg.initSegment) out.push(seg.initSegment);
-            if (seg.data) out.push(seg.data);
+            if (!normalizer && seg.initSegment) {
+                normalizer = createMp4TimebaseNormalizer(seg.initSegment);
+                out.push(seg.initSegment);
+            }
+            if (normalizer && seg.data) {
+                normalizeMp4FragmentTimebase(normalizer, seg.data);
+                out.push(seg.data);
+            }
         });
         parts.forEach(function (p) { transmuxer.push(p); });
         transmuxer.flush();
         if (typeof transmuxer.dispose === 'function') transmuxer.dispose();
         if (out.length === 0) throw new Error('MP4 转封装失败，请改用 TS');
+        finalizeMp4Timebase(normalizer);
         return new Blob(out, { type: 'video/mp4' });
     }
 

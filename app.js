@@ -8936,34 +8936,223 @@ function triggerTsDownload(parts, outputFileName, taskId = '') {
     return triggerBrowserDownload(parts, outputFileName, 'video/mp2t', taskId, arguments[3]);
 }
 
+function readMp4Boxes(view, bytes, start, end) {
+    const boxes = [];
+    let offset = start;
+    while (offset + 8 <= end) {
+        let size = view.getUint32(offset);
+        const type = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+        let headerSize = 8;
+        if (size === 1 && offset + 16 <= end) {
+            size = Number(view.getBigUint64(offset + 8));
+            headerSize = 16;
+        } else if (size === 0) {
+            size = end - offset;
+        }
+        if (size < headerSize || offset + size > end) break;
+        boxes.push({ type, payload: offset + headerSize, end: offset + size });
+        offset += size;
+    }
+    return boxes;
+}
+
+function writeMp4Uint64(view, offset, value) {
+    const normalized = Math.max(0, Math.round(value));
+    view.setUint32(offset, Math.floor(normalized / 4294967296));
+    view.setUint32(offset + 4, normalized >>> 0);
+}
+
+// mux.js 的时间轴依赖分片 PTS 连续。源站分片 PTS 回跳 / 重置 / 33bit 翻转时，
+// 它会按 +2^33 处理，导致导出 MP4 时长多出几十小时。这里改为按样本时长重建时间轴。
+function createMp4TimebaseNormalizer(initSegment) {
+    const bytes = initSegment;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const tracks = new Map();
+    let movieTimescale = 1000;
+    let movieHeader = null;
+
+    readMp4Boxes(view, bytes, 0, bytes.length).forEach(box => {
+        if (box.type !== 'moov') return;
+        readMp4Boxes(view, bytes, box.payload, box.end).forEach(child => {
+            if (child.type === 'mvhd') {
+                const version = bytes[child.payload];
+                movieTimescale = view.getUint32(child.payload + (version === 1 ? 20 : 12)) || 1000;
+                movieHeader = { version, offset: child.payload + (version === 1 ? 24 : 16) };
+            } else if (child.type === 'trak') {
+                let trackId = 0;
+                let timescale = 90000;
+                let mediaHeader = null;
+                let trackHeader = null;
+                readMp4Boxes(view, bytes, child.payload, child.end).forEach(part => {
+                    if (part.type === 'tkhd') {
+                        const version = bytes[part.payload];
+                        trackId = view.getUint32(part.payload + (version === 1 ? 20 : 12));
+                        trackHeader = { version, offset: part.payload + (version === 1 ? 28 : 20) };
+                    } else if (part.type === 'mdia') {
+                        readMp4Boxes(view, bytes, part.payload, part.end).forEach(media => {
+                            if (media.type !== 'mdhd') return;
+                            const version = bytes[media.payload];
+                            timescale = view.getUint32(media.payload + (version === 1 ? 20 : 12)) || timescale;
+                            mediaHeader = { version, offset: media.payload + (version === 1 ? 24 : 16) };
+                        });
+                    }
+                });
+                if (trackId) {
+                    tracks.set(trackId, { timescale, mediaHeader, trackHeader, cursor: 0 });
+                }
+            }
+        });
+    });
+
+    return { bytes, view, tracks, movieTimescale, movieHeader };
+}
+
+function normalizeMp4FragmentTimebase(normalizer, fragment) {
+    const bytes = fragment;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    readMp4Boxes(view, bytes, 0, bytes.length).forEach(moof => {
+        if (moof.type !== 'moof') return;
+        readMp4Boxes(view, bytes, moof.payload, moof.end).forEach(traf => {
+            if (traf.type !== 'traf') return;
+            let trackId = 0;
+            let baseMediaDecodeTime = null;
+            let duration = 0;
+            const sampleDurations = [];
+            readMp4Boxes(view, bytes, traf.payload, traf.end).forEach(box => {
+                if (box.type === 'tfhd') {
+                    trackId = view.getUint32(box.payload + 4);
+                } else if (box.type === 'tfdt') {
+                    baseMediaDecodeTime = { version: bytes[box.payload], offset: box.payload + 4 };
+                } else if (box.type === 'trun') {
+                    const flags = view.getUint32(box.payload) & 0xffffff;
+                    if (!(flags & 0x100)) return;
+                    const sampleCount = view.getUint32(box.payload + 4);
+                    let cursor = box.payload + 8;
+                    if (flags & 0x1) cursor += 4;
+                    if (flags & 0x4) cursor += 4;
+                    const stride = 4
+                        + ((flags & 0x200) ? 4 : 0)
+                        + ((flags & 0x400) ? 4 : 0)
+                        + ((flags & 0x800) ? 4 : 0);
+                    for (let index = 0; index < sampleCount; index += 1, cursor += stride) {
+                        sampleDurations.push({ offset: cursor, value: view.getUint32(cursor) });
+                    }
+                }
+            });
+
+            const track = normalizer.tracks.get(trackId);
+            if (!track || !baseMediaDecodeTime) return;
+
+            // PTS 回跳会让 mux.js 把 +2^33 的跳变算进某个样本时长，这里按同片段中位数修正。
+            if (sampleDurations.length > 3) {
+                const sorted = sampleDurations.map(sample => sample.value).sort((left, right) => left - right);
+                const median = sorted[Math.floor(sorted.length / 2)];
+                const maxAllowed = Math.max(median * 8, Math.round(track.timescale * 0.5));
+                if (median > 0) {
+                    sampleDurations.forEach(sample => {
+                        if (sample.value <= maxAllowed) return;
+                        sample.value = median;
+                        view.setUint32(sample.offset, median);
+                    });
+                }
+            }
+            sampleDurations.forEach(sample => {
+                duration += sample.value;
+            });
+
+            if (baseMediaDecodeTime.version === 1) {
+                writeMp4Uint64(view, baseMediaDecodeTime.offset, track.cursor);
+            } else {
+                view.setUint32(baseMediaDecodeTime.offset, track.cursor >>> 0);
+            }
+            track.cursor += duration;
+        });
+    });
+}
+
+function finalizeMp4Timebase(normalizer) {
+    let longestSeconds = 0;
+    normalizer.tracks.forEach(track => {
+        const seconds = track.cursor / track.timescale;
+        longestSeconds = Math.max(longestSeconds, seconds);
+        if (track.mediaHeader) {
+            if (track.mediaHeader.version === 1) {
+                writeMp4Uint64(normalizer.view, track.mediaHeader.offset, track.cursor);
+            } else {
+                normalizer.view.setUint32(track.mediaHeader.offset, track.cursor >>> 0);
+            }
+        }
+        if (track.trackHeader) {
+            const movieTicks = Math.round(seconds * normalizer.movieTimescale);
+            if (track.trackHeader.version === 1) {
+                writeMp4Uint64(normalizer.view, track.trackHeader.offset, movieTicks);
+            } else {
+                normalizer.view.setUint32(track.trackHeader.offset, movieTicks >>> 0);
+            }
+        }
+    });
+    if (normalizer.movieHeader) {
+        const movieTicks = Math.round(longestSeconds * normalizer.movieTimescale);
+        if (normalizer.movieHeader.version === 1) {
+            writeMp4Uint64(normalizer.view, normalizer.movieHeader.offset, movieTicks);
+        } else {
+            normalizer.view.setUint32(normalizer.movieHeader.offset, movieTicks >>> 0);
+        }
+    }
+    return longestSeconds;
+}
+
+function createMp4TransmuxSession(Transmuxer, options = {}) {
+    const wrapAsBlob = options.wrapAsBlob === true;
+    const fragments = [];
+    let initSegment = null;
+    let normalizer = null;
+
+    const transmuxer = new Transmuxer();
+    transmuxer.on('data', segment => {
+        if (!initSegment && segment?.initSegment instanceof Uint8Array) {
+            initSegment = segment.initSegment;
+            normalizer = createMp4TimebaseNormalizer(initSegment);
+        }
+        if (normalizer && segment?.data instanceof Uint8Array) {
+            normalizeMp4FragmentTimebase(normalizer, segment.data);
+            fragments.push(wrapAsBlob ? new Blob([segment.data]) : segment.data);
+        }
+    });
+
+    return {
+        pushSegment(bytes) {
+            transmuxer.push(bytes);
+        },
+        finish() {
+            transmuxer.flush();
+            if (typeof transmuxer.dispose === 'function') {
+                transmuxer.dispose();
+            }
+            if (!initSegment || fragments.length === 0) {
+                return null;
+            }
+            finalizeMp4Timebase(normalizer);
+            return [wrapAsBlob ? new Blob([initSegment]) : initSegment, ...fragments];
+        }
+    };
+}
+
 function transmuxTsPartsToMp4(parts) {
     const Transmuxer = globalThis.muxjs?.mp4?.Transmuxer;
     if (typeof Transmuxer !== 'function') {
         throw new Error('MP4 不兼容，建议改用 TS');
     }
 
-    const mp4Parts = [];
-    const transmuxer = new Transmuxer();
-    transmuxer.on('data', segment => {
-        if (segment?.initSegment instanceof Uint8Array) {
-            mp4Parts.push(segment.initSegment);
-        }
-        if (segment?.data instanceof Uint8Array) {
-            mp4Parts.push(segment.data);
-        }
-    });
-
-    parts.forEach(part => {
+    const session = createMp4TransmuxSession(Transmuxer);
+    (Array.isArray(parts) ? parts : []).forEach(part => {
         if (part instanceof Uint8Array) {
-            transmuxer.push(part);
+            session.pushSegment(part);
         }
     });
-    transmuxer.flush();
-    if (typeof transmuxer.dispose === 'function') {
-        transmuxer.dispose();
-    }
 
-    if (mp4Parts.length === 0) {
+    const mp4Parts = session.finish();
+    if (!mp4Parts) {
         throw new Error('MP4 不兼容，建议改用 TS');
     }
     return mp4Parts;
@@ -8975,44 +9164,28 @@ async function transmuxTsBlobPartsToMp4(parts, taskId = '') {
         throw new Error('MP4 不兼容，建议改用 TS');
     }
 
-    const mp4Parts = [];
-    let hasInitSegment = false;
-    const transmuxer = new Transmuxer();
-    transmuxer.on('data', segment => {
-        if (!hasInitSegment && segment?.initSegment instanceof Uint8Array) {
-            mp4Parts.push(new Blob([segment.initSegment]));
-            hasInitSegment = true;
-        }
-        if (segment?.data instanceof Uint8Array) {
-            mp4Parts.push(new Blob([segment.data]));
-        }
-    });
+    const session = createMp4TransmuxSession(Transmuxer, { wrapAsBlob: true });
 
-    try {
-        for (const part of Array.isArray(parts) ? parts : []) {
-            const partSize = part instanceof Blob
-                ? part.size
-                : (part instanceof Uint8Array ? part.byteLength : 0);
-            const reservation = typeof downloadMemoryGovernor !== 'undefined'
-                ? downloadMemoryGovernor.reserve(taskId, Math.max(MEBIBYTE, partSize * 2))
-                : null;
-            try {
-                const bytes = part instanceof Blob
-                    ? new Uint8Array(await part.arrayBuffer())
-                    : part;
-                if (!(bytes instanceof Uint8Array)) continue;
-                transmuxer.push(bytes);
-                transmuxer.flush();
-            } finally {
-                if (reservation) downloadMemoryGovernor.release(reservation);
-            }
-        }
-    } finally {
-        if (typeof transmuxer.dispose === 'function') {
-            transmuxer.dispose();
+    for (const part of Array.isArray(parts) ? parts : []) {
+        const partSize = part instanceof Blob
+            ? part.size
+            : (part instanceof Uint8Array ? part.byteLength : 0);
+        const reservation = typeof downloadMemoryGovernor !== 'undefined'
+            ? downloadMemoryGovernor.reserve(taskId, Math.max(MEBIBYTE, partSize * 2))
+            : null;
+        try {
+            const bytes = part instanceof Blob
+                ? new Uint8Array(await part.arrayBuffer())
+                : part;
+            if (!(bytes instanceof Uint8Array)) continue;
+            session.pushSegment(bytes);
+        } finally {
+            if (reservation) downloadMemoryGovernor.release(reservation);
         }
     }
-    if (mp4Parts.length === 0) {
+
+    const mp4Parts = session.finish();
+    if (!mp4Parts) {
         throw new Error('MP4 不兼容，建议改用 TS');
     }
     return mp4Parts;
