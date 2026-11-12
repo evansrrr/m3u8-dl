@@ -721,6 +721,7 @@ async function init() {
     resetNewTaskFormToDefaults();
     renderTasks();
     setupEventListeners();
+    void setupClipboardWatcher();
     applyQuickDownloadFromLocation();
     globalThis.addEventListener('pagehide', () => {
         void stopLocalTaskExecutions('pagehide');
@@ -5798,7 +5799,7 @@ function getInjectScriptBaseUrl() {
 
 function buildCrossOriginInjectCode() {
     const base = getInjectScriptBaseUrl();
-    const scriptUrl = new URL('inject.js?v=202611040001', base).href;
+    const scriptUrl = new URL('inject.js?v=202611120001', base).href;
     return '(function(){'
         + 'if(window.__m3u8InjectV2Loaded__){window.__m3u8InjectV2Show__&&window.__m3u8InjectV2Show__();return;}'
         + 'window.__M3U8_BASE__=' + JSON.stringify(base) + ';'
@@ -6239,6 +6240,267 @@ function isSupportedPasteUrl(text) {
     } catch {
         return false;
     }
+}
+
+/*
+ * Clipboard watcher: pick up m3u8 links copied anywhere and prefill a new task.
+ *
+ * Reading the clipboard without a stored permission decision re-opens the
+ * browser permission dialog on every single call, so automatic reads only run
+ * once the permission is already 'granted'. Chrome never persists that decision
+ * for `file://` pages, which is why polling there produced a dialog every few
+ * seconds. An ungranted page asks at most once, from a real user gesture.
+ */
+const CLIPBOARD_POLL_INTERVAL_MS = 2500;
+const CLIPBOARD_AUTO_DISABLED_STORAGE_KEY = 'clipboard-auto-read-disabled';
+let clipboardPollTimer = null;
+let clipboardWatcherStarted = false;
+let clipboardAccessDenied = false;
+let clipboardReadPending = false;
+let clipboardPermissionGranted = false;
+let clipboardPermissionApiSupported = false;
+let clipboardGesturePromptArmed = false;
+let clipboardPermissionStatus = null;
+let lastSeenClipboardText = '';
+let lastHandledClipboardUrl = '';
+let lastClipboardFilledUrl = '';
+
+function canReadClipboard() {
+    return Boolean(globalThis.isSecureContext)
+        && typeof globalThis.navigator?.clipboard?.readText === 'function';
+}
+
+// `file://` and opaque origins cannot store a clipboard permission decision, so
+// every readText() call there raises a fresh permission dialog. Skip automatic
+// reads entirely and leave the user with manual pasting.
+function isClipboardPermissionPersistable() {
+    try {
+        const protocol = String(globalThis.location?.protocol || '');
+        const origin = String(globalThis.location?.origin || '');
+        return protocol !== 'file:' && Boolean(origin) && origin !== 'null';
+    } catch {
+        return false;
+    }
+}
+
+async function queryClipboardPermissionState() {
+    try {
+        if (!globalThis.navigator?.permissions?.query) return 'unknown';
+        const status = await globalThis.navigator.permissions.query({ name: 'clipboard-read' });
+        clipboardPermissionApiSupported = true;
+        return String(status?.state || 'unknown');
+    } catch {
+        return 'unknown';
+    }
+}
+
+function watchClipboardPermissionChange() {
+    if (clipboardPermissionStatus || !globalThis.navigator?.permissions?.query) return;
+    globalThis.navigator.permissions.query({ name: 'clipboard-read' }).then(status => {
+        if (!status || typeof status.addEventListener !== 'function') return;
+        clipboardPermissionStatus = status;
+        status.addEventListener('change', () => {
+            void applyClipboardPermissionState(String(status.state || 'unknown'));
+        });
+    }).catch(() => {});
+}
+
+async function applyClipboardPermissionState(state) {
+    // A page loaded from disk can never hold the permission for long, so even a
+    // session-scoped 'granted' would fall back to a dialog on every read.
+    if (!isClipboardPermissionPersistable()) {
+        clipboardPermissionGranted = false;
+        stopClipboardPolling();
+        return false;
+    }
+
+    if (state === 'granted') {
+        clipboardPermissionGranted = true;
+        clipboardAccessDenied = false;
+        writeLocalStorageValue(CLIPBOARD_AUTO_DISABLED_STORAGE_KEY, '0');
+        startClipboardPolling();
+        await checkClipboardForM3u8Link();
+        return true;
+    }
+
+    clipboardPermissionGranted = false;
+    stopClipboardPolling();
+
+    if (state === 'denied') {
+        clipboardAccessDenied = true;
+        writeLocalStorageValue(CLIPBOARD_AUTO_DISABLED_STORAGE_KEY, '1');
+        return false;
+    }
+
+    // 'prompt' or an unsupported Permissions API: never poll, ask once on a gesture.
+    armClipboardGesturePrompt();
+    return false;
+}
+
+function armClipboardGesturePrompt() {
+    if (clipboardGesturePromptArmed || clipboardAccessDenied) return;
+    if (!isClipboardPermissionPersistable()) return;
+    if (readLocalStorageValue(CLIPBOARD_AUTO_DISABLED_STORAGE_KEY) === '1') return;
+
+    clipboardGesturePromptArmed = true;
+    const trigger = () => {
+        document.removeEventListener('pointerdown', trigger, true);
+        document.removeEventListener('keydown', trigger, true);
+        void requestClipboardAccessOnce();
+    };
+    document.addEventListener('pointerdown', trigger, true);
+    document.addEventListener('keydown', trigger, true);
+}
+
+async function requestClipboardAccessOnce() {
+    if (!canReadClipboard() || clipboardReadPending || clipboardAccessDenied) return;
+
+    clipboardReadPending = true;
+    let text = '';
+    try {
+        text = await globalThis.navigator.clipboard.readText();
+    } catch {
+        clipboardReadPending = false;
+        await settleClipboardReadFailure();
+        return;
+    }
+    clipboardReadPending = false;
+
+    clipboardPermissionGranted = true;
+    if (await queryClipboardPermissionState() === 'granted') startClipboardPolling();
+    handleClipboardText(text);
+}
+
+// A failed read must never be retried automatically: retrying is exactly what
+// re-opens the permission dialog.
+async function settleClipboardReadFailure() {
+    const state = await queryClipboardPermissionState();
+    if (state === 'granted') {
+        // Granted but unreadable (document unfocused, clipboard busy): polling is safe.
+        clipboardPermissionGranted = true;
+        startClipboardPolling();
+        return;
+    }
+    clipboardPermissionGranted = false;
+    clipboardAccessDenied = true;
+    stopClipboardPolling();
+    writeLocalStorageValue(CLIPBOARD_AUTO_DISABLED_STORAGE_KEY, '1');
+}
+
+function handleClipboardText(text) {
+    const normalized = String(text || '').trim();
+    if (!normalized || normalized === lastSeenClipboardText) return;
+    lastSeenClipboardText = normalized;
+
+    const url = extractM3u8UrlFromText(normalized);
+    if (!url || url === lastHandledClipboardUrl) return;
+    if (applyClipboardM3u8Link(url)) {
+        lastHandledClipboardUrl = url;
+    }
+}
+
+function extractM3u8UrlFromText(text) {
+    const candidates = String(text || '').match(/https?:\/\/[^\s"'<>]+/gi) || [];
+    for (const raw of candidates) {
+        const cleaned = raw.replace(/["'<>]/g, '').replace(/[),.;\]}]+$/g, '');
+        let parsed = null;
+        try {
+            parsed = new URL(cleaned);
+        } catch {
+            continue;
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+        const pathLower = parsed.pathname.toLowerCase();
+        const queryLower = parsed.search.toLowerCase();
+        // Pages that merely mention m3u8 in their path are not playlists.
+        if (/\.(html?|php|aspx?|jsp)$/.test(pathLower)) continue;
+        const looksLikePlaylist = /\.m3u8($|[?&#/])/.test(`${pathLower}${queryLower}`)
+            || /\/m3u8(\/|$)/.test(pathLower)
+            || /(?:^|[?&])(?:format|type)=m3u8(?:$|&)/.test(queryLower);
+        if (looksLikePlaylist) return parsed.href;
+    }
+    return '';
+}
+
+function applyClipboardM3u8Link(url) {
+    if (!url) return false;
+    if (activeModalId && activeModalId !== 'new-task') return false;
+    const urlInput = document.getElementById('new-url');
+    if (!urlInput) return false;
+
+    const currentValue = String(urlInput.value || '').trim();
+    // Never overwrite a link the user typed or opened through quick-download params.
+    if (currentValue && currentValue !== lastClipboardFilledUrl) return false;
+    if (currentValue === url) return false;
+
+    if (!activeModalId) {
+        shouldSkipModalFallbackFocus = true;
+        openModal('new-task');
+    }
+    populateNewTaskUrl(url);
+    lastClipboardFilledUrl = url;
+    showToast('已从剪贴板填入 m3u8 链接', { type: 'info' });
+    return true;
+}
+
+async function checkClipboardForM3u8Link() {
+    if (!canReadClipboard() || clipboardAccessDenied || clipboardReadPending) return;
+    // Reading without a stored permission would pop the browser dialog each time.
+    if (!clipboardPermissionGranted) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
+    clipboardReadPending = true;
+    let text = '';
+    try {
+        text = await globalThis.navigator.clipboard.readText();
+    } catch {
+        clipboardReadPending = false;
+        await settleClipboardReadFailure();
+        return;
+    }
+    clipboardReadPending = false;
+    handleClipboardText(text);
+}
+
+function stopClipboardPolling() {
+    if (clipboardPollTimer) {
+        clearInterval(clipboardPollTimer);
+        clipboardPollTimer = null;
+    }
+}
+
+function startClipboardPolling() {
+    if (clipboardPollTimer) return;
+    if (!isClipboardPermissionPersistable()) return;
+    if (!clipboardPermissionGranted || !clipboardPermissionApiSupported) return;
+    clipboardPollTimer = setInterval(() => {
+        void checkClipboardForM3u8Link();
+    }, CLIPBOARD_POLL_INTERVAL_MS);
+}
+
+async function refreshClipboardWatcherState() {
+    if (clipboardAccessDenied) return;
+    if (clipboardPermissionGranted) {
+        void checkClipboardForM3u8Link();
+        return;
+    }
+    await applyClipboardPermissionState(await queryClipboardPermissionState());
+}
+
+async function setupClipboardWatcher() {
+    if (clipboardWatcherStarted) return;
+    clipboardWatcherStarted = true;
+    if (!canReadClipboard()) return;
+
+    watchClipboardPermissionChange();
+    await applyClipboardPermissionState(await queryClipboardPermissionState());
+
+    if (typeof window.addEventListener === 'function') {
+        window.addEventListener('focus', () => { void refreshClipboardWatcherState(); });
+    }
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') void refreshClipboardWatcherState();
+    });
 }
 
 function populateNewTaskUrl(url) {

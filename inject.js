@@ -11,6 +11,34 @@
     }
     window.__m3u8InjectV2Loaded__ = true;
 
+    // UI language follows the browser: Chinese stays Chinese, everything else is English.
+    var TEXT = (function () {
+        var tags = (navigator.languages && navigator.languages.length) ? navigator.languages : [navigator.language || ''];
+        var tag = String(tags[0] || '');
+        if (/^zh(\b|-|_)/i.test(tag)) {
+            return {
+                title: 'M3U8 注入下载', close: '关闭', urlLabel: 'm3u8 地址', formatLabel: '保存格式',
+                start: '开始下载', cancel: '取消下载', ready: '就绪', needUrl: '请输入 m3u8 地址',
+                canceled: '已取消', parsing: '解析播放列表...', noVariant: '未在 master playlist 中找到可用清晰度',
+                noSegments: '未解析到视频分片（若为 fMP4/Byte Range 请改用主工具页的 TS/MP4 下载）',
+                missingKey: '缺少 AES 密钥', merging: '合并文件...', done: '完成：', failed: '出错：',
+                muxLoad: 'mux.js 加载失败', muxLoadHint: 'mux.js 加载失败（请确认工具已部署）',
+                downloadFailed: '下载失败', quality: '选择清晰度：', badKeyLength: 'AES-128 密钥长度异常：',
+                mp4Failed: 'MP4 转封装失败，请改用 TS'
+            };
+        }
+        return {
+            title: 'M3U8 injected download', close: 'Close', urlLabel: 'm3u8 URL', formatLabel: 'Format',
+            start: 'Start download', cancel: 'Cancel download', ready: 'Ready', needUrl: 'Enter an m3u8 URL',
+            canceled: 'Canceled', parsing: 'Parsing playlist...', noVariant: 'No usable quality in this master playlist',
+            noSegments: 'No video segments found (for fMP4/byte range, use TS/MP4 on the main page)',
+            missingKey: 'AES key missing', merging: 'Merging files...', done: 'Done: ', failed: 'Error: ',
+            muxLoad: 'Failed to load mux.js', muxLoadHint: 'Failed to load mux.js (make sure the tool is deployed)',
+            downloadFailed: 'download failed', quality: 'Selected quality: ', badKeyLength: 'Unexpected AES-128 key length: ',
+            mp4Failed: 'MP4 remux failed, use TS instead'
+        };
+    })();
+
     var BASE = (window.__M3U8_BASE__ || (location.origin + '/')).replace(/\/?$/, '/');
 
     // ---------- 工具函数 ----------
@@ -134,7 +162,7 @@
     // ---------- 下载核心 ----------
     function fetchArrayBuffer(url) {
         return fetch(url, { credentials: 'include' }).then(function (res) {
-            if (!res.ok) throw new Error('HTTP ' + res.status + ' 下载失败：' + url);
+            if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + TEXT.downloadFailed + ': ' + url);
             return res.arrayBuffer();
         });
     }
@@ -172,7 +200,7 @@
         });
         await Promise.all(keyUris.map(async function (uri) {
             var bytes = new Uint8Array(await fetchArrayBuffer(uri));
-            if (bytes.length !== 16) throw new Error('AES-128 密钥长度异常：' + uri);
+            if (bytes.length !== 16) throw new Error(TEXT.badKeyLength + uri);
             cache.set(uri, bytes);
         }));
         return cache;
@@ -211,16 +239,17 @@
         var panel = document.createElement('div');
         panel.className = 'm3u8-inject-panel';
         panel.innerHTML =
-            '<div class="m3u8-inject-head"><span class="t">M3U8 注入下载</span><span class="x" title="关闭">×</span></div>' +
+            '<div class="m3u8-inject-head"><span class="t"></span><span class="x" title="' + TEXT.close + '">×</span></div>' +
             '<div class="m3u8-inject-body">' +
-            '<div class="m3u8-inject-row"><label class="m3u8-inject-label">m3u8 地址</label><input class="m3u8-inject-input" type="text" placeholder="https://.../index.m3u8"></div>' +
-            '<div class="m3u8-inject-row"><label class="m3u8-inject-label">保存格式</label><div class="m3u8-inject-formats"><span class="m3u8-inject-fmt" data-fmt="ts">TS</span><span class="m3u8-inject-fmt on" data-fmt="mp4">MP4</span></div></div>' +
-            '<button class="m3u8-inject-btn">开始下载</button>' +
+            '<div class="m3u8-inject-row"><label class="m3u8-inject-label">' + TEXT.urlLabel + '</label><input class="m3u8-inject-input" type="text" placeholder="https://.../index.m3u8"></div>' +
+            '<div class="m3u8-inject-row"><label class="m3u8-inject-label">' + TEXT.formatLabel + '</label><div class="m3u8-inject-formats"><span class="m3u8-inject-fmt" data-fmt="ts">TS</span><span class="m3u8-inject-fmt on" data-fmt="mp4">MP4</span></div></div>' +
+            '<button class="m3u8-inject-btn">' + TEXT.start + '</button>' +
             '<div class="m3u8-inject-progress"><div class="bar"></div></div>' +
-            '<div class="m3u8-inject-status">就绪</div>' +
+            '<div class="m3u8-inject-status">' + TEXT.ready + '</div>' +
             '</div>';
         document.body.appendChild(panel);
 
+        panel.querySelector('.m3u8-inject-head .t').textContent = TEXT.title;
         var head = panel.querySelector('.m3u8-inject-head');
         var input = panel.querySelector('.m3u8-inject-input');
         var fmtEls = panel.querySelectorAll('.m3u8-inject-fmt');
@@ -262,14 +291,14 @@
         var currentCancel = null;
         btn.addEventListener('click', function () {
             var url = input.value.trim();
-            if (!url) { setStatus('请输入 m3u8 地址', true); return; }
+            if (!url) { setStatus(TEXT.needUrl, true); return; }
             if (currentCancel) {
                 // 视为取消
                 currentCancel();
                 currentCancel = null;
-                btn.textContent = '开始下载';
+                btn.textContent = TEXT.start;
                 btn.disabled = false;
-                setStatus('已取消');
+                setStatus(TEXT.canceled);
                 return;
             }
             startDownload(url, format);
@@ -284,10 +313,10 @@
         }
 
         async function startDownload(url, fmt) {
-            btn.textContent = '取消下载';
+            btn.textContent = TEXT.cancel;
             btn.disabled = false;
             setProgress(0);
-            setStatus('解析播放列表...');
+            setStatus(TEXT.parsing);
             var cancelRequested = false;
             currentCancel = function () { cancelRequested = true; };
 
@@ -304,9 +333,9 @@
                 if (parsed.type === 'master') {
                     // 自动选择最高码率的 variant
                     var v = parsed.variants.slice().sort(function (a, b) { return b.bandwidth - a.bandwidth; })[0];
-                    if (!v) throw new Error('未在 master playlist 中找到可用清晰度');
+                    if (!v) throw new Error(TEXT.noVariant);
                     chosenUrl = v.url;
-                    setStatus('选择清晰度：' + (v.resolution || v.bandwidth + ' bps'));
+                    setStatus(TEXT.quality + (v.resolution || v.bandwidth + ' bps'));
                     var mediaText = await fetchArrayBuffer(v.url).then(function (ab) {
                         return new TextDecoder('utf-8').decode(ab);
                     });
@@ -316,7 +345,7 @@
 
                 segments = (parsed.segments || []).filter(function (s) { return s && s.url && !s.unsupported; });
                 if (segments.length === 0) {
-                    throw new Error('未解析到视频分片（若为 fMP4/Byte Range 请改用主工具页的 TS/MP4 下载）');
+                    throw new Error(TEXT.noSegments);
                 }
 
                 var keyCache = await buildKeyCache(segments);
@@ -324,7 +353,7 @@
 
                 var completed = 0;
                 var totalBytes = 0;
-                setStatus('下载分片 0/' + segments.length);
+                setStatus('Segments 0/' + segments.length);
 
                 var dl = downloadWithConcurrency(segments, async function (seg) {
                     if (cancelRequested) throw new Error('__cancelled__');
@@ -332,13 +361,13 @@
                     var bytes = new Uint8Array(ab);
                     if (seg.key && seg.key.method === 'AES-128') {
                         var keyBytes = keyCache.get(seg.key.uri);
-                        if (!keyBytes) throw new Error('缺少 AES 密钥');
+                        if (!keyBytes) throw new Error(TEXT.missingKey);
                         var iv = seg.key.iv && seg.key.iv.length === 16 ? seg.key.iv : aesIvForSegment(seg);
                         bytes = await decryptAes128(bytes, keyBytes, iv);
                     }
                     totalBytes += bytes.length;
                     completed++;
-                    setStatus('下载分片 ' + completed + '/' + segments.length + '（' + fmtBytes(totalBytes) + '）');
+                    setStatus('Segments ' + completed + '/' + segments.length + ' (' + fmtBytes(totalBytes) + ')');
                     setProgress(completed / segments.length);
                     return bytes;
                 }, 6);
@@ -346,7 +375,7 @@
                 var parts = await dl.promise;
                 if (cancelRequested) return;
 
-                setStatus('合并文件...');
+                setStatus(TEXT.merging);
                 var validParts = parts.filter(function (p) { return p instanceof Uint8Array; });
 
                 var filename = (function () {
@@ -363,14 +392,14 @@
                     var tsBlob = new Blob(validParts, { type: 'video/mp2t' });
                     triggerDownload(tsBlob, filename + '.ts', 'video/mp2t');
                 }
-                setStatus('完成：' + filename + '.' + fmt + '（' + fmtBytes(totalBytes) + '）');
+                setStatus(TEXT.done + filename + '.' + fmt + ' (' + fmtBytes(totalBytes) + ')');
                 setProgress(1);
             } catch (e) {
-                if (e && e.message === '__cancelled__') { setStatus('已取消'); }
-                else setStatus('出错：' + (e && e.message ? e.message : e), true);
+                if (e && e.message === '__cancelled__') { setStatus(TEXT.canceled); }
+                else setStatus(TEXT.failed + (e && e.message ? e.message : e), true);
             } finally {
                 currentCancel = null;
-                btn.textContent = '开始下载';
+                btn.textContent = TEXT.start;
                 btn.disabled = false;
             }
         }
@@ -386,9 +415,9 @@
             s.src = BASE + 'vendor/mux.min.js';
             s.onload = function () {
                 if (window.muxjs && window.muxjs.mp4 && window.muxjs.mp4.Transmuxer) resolve(window.muxjs);
-                else reject(new Error('mux.js 加载失败'));
+                else reject(new Error(TEXT.muxLoad));
             };
-            s.onerror = function () { reject(new Error('mux.js 加载失败（请确认工具已部署）')); };
+            s.onerror = function () { reject(new Error(TEXT.muxLoadHint)); };
             document.head.appendChild(s);
         });
     }
@@ -559,7 +588,7 @@
         parts.forEach(function (p) { transmuxer.push(p); });
         transmuxer.flush();
         if (typeof transmuxer.dispose === 'function') transmuxer.dispose();
-        if (out.length === 0) throw new Error('MP4 转封装失败，请改用 TS');
+        if (out.length === 0) throw new Error(TEXT.mp4Failed);
         finalizeMp4Timebase(normalizer);
         return new Blob(out, { type: 'video/mp4' });
     }
