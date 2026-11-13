@@ -974,6 +974,19 @@ svg.task-row__status-icon {
     white-space: nowrap;
 }
 
+.task-row__progress-size,
+.task-row__progress-eta {
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-faint, var(--text-muted));
+    white-space: nowrap;
+}
+
+.task-row__progress-eta {
+    color: var(--text-muted);
+}
+
 .task-row__actions {
     display: inline-flex;
     align-items: center;
@@ -1135,6 +1148,10 @@ svg.task-row__status-icon {
 
     .task-row__progress {
         padding: 0.25rem 0.5rem 0.125rem;
+    }
+
+    .task-row__progress-eta {
+        display: none;
     }
 
     .task-row__actions {

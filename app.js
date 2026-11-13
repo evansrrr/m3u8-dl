@@ -2148,6 +2148,21 @@ function createTaskCardHTML(task) {
     const segmentCountHTML = segmentTotal > 0
         ? `<span class="task-row__progress-count" aria-label="${escapeHTML(`已下载 ${segmentCompleted} / 共 ${segmentTotal} 片`)}">${segmentCompleted}/${segmentTotal}</span>`
         : '';
+    // 已下载大小与剩余时间只在真正下载时出现，暂停后保留大小方便核对进度。
+    const downloadedBytes = Math.max(0, Number(task.downloadedBytes) || 0);
+    const showDownloadedSize = downloadedBytes > 0
+        && (task.status === 'downloading' || task.status === 'paused');
+    const downloadedSizeLabel = showDownloadedSize ? formatStorageBytes(downloadedBytes) : '';
+    const downloadedSizeHTML = showDownloadedSize
+        ? `<span class="task-row__progress-size" title="${escapeHTML(`已下载大小 ${downloadedSizeLabel}`)}">${escapeHTML(downloadedSizeLabel)}</span>`
+        : '';
+    const etaSeconds = Math.max(0, Number(task.estimatedRemainingSeconds) || 0);
+    const etaLabel = task.status === 'downloading' && etaSeconds > 0
+        ? `剩余 ${formatEstimatedRemainingSeconds(etaSeconds, 'downloading')}`
+        : '';
+    const etaHTML = etaLabel
+        ? `<span class="task-row__progress-eta" title="${escapeHTML(etaLabel)}">${escapeHTML(etaLabel)}</span>`
+        : '';
     const format = escapeHTML(task.format || DEFAULT_TASK_PARAMS.format);
     const duration = escapeHTML(task.duration || '00:00:00');
     const status = escapeHTML(task.status || 'downloading');
@@ -2272,6 +2287,8 @@ function createTaskCardHTML(task) {
                     </div>
                     <span class="task-row__progress-text">${progress}%</span>
                     ${segmentCountHTML}
+                    ${downloadedSizeHTML}
+                    ${etaHTML}
                 </div>
             </div>
             <div class="task-row__actions">
@@ -5815,7 +5832,7 @@ function getInjectScriptBaseUrl() {
 
 function buildCrossOriginInjectCode() {
     const base = getInjectScriptBaseUrl();
-    const scriptUrl = new URL('inject.js?v=202611140002', base).href;
+    const scriptUrl = new URL('inject.js?v=202611140003', base).href;
     const seedInput = document.getElementById('new-url');
     const seedUrl = String(seedInput?.value || '').trim();
     return '(function(){'
@@ -9284,6 +9301,11 @@ function createMp4TransmuxSession(Transmuxer, options = {}) {
     return {
         pushSegment(bytes) {
             transmuxer.push(bytes);
+            // 每片立即 flush：mux.js 只在 flush 时产出 moof+mdat，如果不 flush，整部
+            // 视频会被攒成一个巨大的分片。分片越粗，播放器拖进度条时越难定位，只能
+            // 顺序扫描（Windows 自带播放器会卡住数秒）。这里的粒度必须和边下边存
+            // 的流式输出保持一致。
+            transmuxer.flush();
         },
         finish() {
             transmuxer.flush();

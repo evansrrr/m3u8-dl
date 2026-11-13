@@ -59,7 +59,13 @@
                 liveNote: '直播播放列表，仅下载当前已存在的分片',
                 keyGroupMismatch: '不支持的密钥格式：',
                 retrying: '重试第 ',
-                noMap: '缺少 fMP4 初始化片段'
+                noMap: '缺少 fMP4 初始化片段',
+                streamLabel: '边下边存',
+                streamHint: '边下载边写盘，长视频不占内存',
+                pickFailed: '无法选择保存位置：',
+                writing: '写入磁盘...',
+                writeFailed: '写入磁盘失败：',
+                streamUnsupported: '当前环境无法直接写盘，已改为内存缓存'
             };
         }
         return {
@@ -89,7 +95,13 @@
             liveNote: 'Live playlist — only segments currently listed will be downloaded',
             keyGroupMismatch: 'Unsupported key format: ',
             retrying: 'Retry ',
-            noMap: 'Missing fMP4 init segment'
+            noMap: 'Missing fMP4 init segment',
+            streamLabel: 'Stream to disk',
+            streamHint: 'Writes while downloading; long videos stay out of memory',
+            pickFailed: 'Cannot choose a save location: ',
+            writing: 'Writing to disk...',
+            writeFailed: 'Disk write failed: ',
+            streamUnsupported: 'Direct disk writing is unavailable here, falling back to memory'
         };
     })();
 
@@ -653,12 +665,12 @@
                             : aesIvForSequence(segment.sequence);
                         bytes = await decryptAes128(bytes, keyBytes, iv);
                     }
-                    results[index] = bytes;
-                    options.onSegment(index, bytes.length, false);
+                    if (!options.consume) results[index] = bytes;
+                    options.onSegment(index, bytes, false);
                 } catch (error) {
                     if (isAbortError(error)) throw error;
                     failed.push({ index: index, error: error });
-                    options.onSegment(index, 0, true);
+                    options.onSegment(index, null, true);
                 }
             }
         }
@@ -861,7 +873,11 @@
             }
         });
         parts.forEach(function (part) {
-            if (part && part.length) transmuxer.push(part);
+            if (!part || !part.length) return;
+            // 逐片 flush，让输出粒度与边下边存一致（一片一个 moof+mdat）。
+            // 否则 mux.js 会把整部视频攒成一个巨大分片，播放器拖动进度条只能顺序扫描。
+            transmuxer.push(part);
+            transmuxer.flush();
         });
         transmuxer.flush();
         if (typeof transmuxer.dispose === 'function') transmuxer.dispose();
@@ -899,6 +915,148 @@
         anchor.click();
         document.body.removeChild(anchor);
         setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+    }
+
+    // ---------- 边下边存 ----------
+    function supportsStreamSave() {
+        return typeof window.showSaveFilePicker === 'function' && window.isSecureContext !== false;
+    }
+
+    // 原生文件句柄：顺序写 + 回到文件开头改写（MP4 收尾回填时长要用）。
+    function createFileWriter(handle, onBytes) {
+        var writable = null;
+        return {
+            mode: 'file-system',
+            fileName: handle && handle.name ? handle.name : '',
+            open: async function () {
+                writable = await handle.createWritable();
+            },
+            write: async function (bytes) {
+                if (!writable) throw new Error(TEXT.writeFailed + 'writer closed');
+                await writable.write(bytes);
+                if (onBytes) onBytes(bytes.byteLength || bytes.length || 0);
+            },
+            patchPrefix: async function (bytes) {
+                if (!writable || !(bytes instanceof Uint8Array)) return false;
+                await writable.write({ type: 'write', position: 0, data: bytes });
+                return true;
+            },
+            close: async function () {
+                if (!writable) return;
+                var target = writable;
+                writable = null;
+                await target.close();
+            },
+            abort: async function () {
+                if (!writable) return;
+                var target = writable;
+                writable = null;
+                try {
+                    if (typeof target.abort === 'function') await target.abort();
+                    else await target.close();
+                } catch (e) { /* 已经关闭或不可回滚 */ }
+            }
+        };
+    }
+
+    // MP4 边下边存：mux.js 逐片 push + flush 产出 moof+mdat 分片，写盘时内存里只有当前分片。
+    // 输出结构与内存模式逐片导出的结果一致，播放器拖动进度条时粒度相同。
+    function createMp4StreamPipeline(writer) {
+        var Transmuxer = window.muxjs && window.muxjs.mp4 && window.muxjs.mp4.Transmuxer;
+        if (typeof Transmuxer !== 'function' || !writer) return null;
+
+        var transmuxer = new Transmuxer();
+        var initSegment = null;
+        var normalizer = null;
+        var pending = [];
+        var initWritten = false;
+        var emptyPushCount = 0;
+
+        transmuxer.on('data', function (seg) {
+            if (!initSegment && seg && seg.initSegment instanceof Uint8Array) {
+                initSegment = seg.initSegment;
+                normalizer = createMp4TimebaseNormalizer(initSegment);
+            }
+            if (seg && seg.data instanceof Uint8Array && seg.data.byteLength > 0) {
+                if (normalizer) normalizeMp4FragmentTimebase(normalizer, seg.data);
+                pending.push(seg.data);
+            }
+        });
+
+        return {
+            mode: 'file-system',
+            write: async function (bytes) {
+                pending = [];
+                transmuxer.push(bytes);
+                transmuxer.flush();
+                if (!initSegment) {
+                    // 首个完整 GOP 需要一点缓冲，给两片宽限。
+                    emptyPushCount += 1;
+                    if (emptyPushCount >= 2) throw new Error(TEXT.mp4Failed);
+                    return;
+                }
+                if (!initWritten) {
+                    await writer.write(new Uint8Array(initSegment));
+                    initWritten = true;
+                }
+                for (var i = 0; i < pending.length; i++) await writer.write(pending[i]);
+                pending = [];
+            },
+            close: async function () {
+                if (typeof transmuxer.dispose === 'function') transmuxer.dispose();
+                if (!initWritten) throw new Error(TEXT.mp4Failed);
+                if (normalizer) {
+                    finalizeMp4Timebase(normalizer);
+                    try {
+                        await writer.patchPrefix(initSegment);
+                    } catch (e) { /* 时长字段不影响解码 */ }
+                }
+                await writer.close();
+            },
+            abort: async function () {
+                try {
+                    if (typeof transmuxer.dispose === 'function') transmuxer.dispose();
+                } catch (e) { /* ignore */ }
+                pending = [];
+                await writer.abort();
+            }
+        };
+    }
+
+    // 并发下载会产生乱序完成，写盘必须按分片顺序：先入队，游标推进到哪就写到哪。
+    function createOrderedSink(writeChunk, total, onError) {
+        var queue = new Array(total);
+        var cursor = 0;
+        var chain = Promise.resolve();
+        var failure = null;
+
+        async function drain() {
+            while (!failure && cursor < total && queue[cursor] !== undefined) {
+                var chunk = queue[cursor];
+                queue[cursor] = undefined;
+                cursor += 1;
+                if (!chunk) continue; // null 表示该分片下载失败，跳过
+                try {
+                    await writeChunk(chunk);
+                } catch (error) {
+                    failure = error;
+                    queue.length = 0;
+                    if (onError) onError(error);
+                    throw error;
+                }
+            }
+        }
+
+        return {
+            push: function (index, chunk) {
+                queue[index] = chunk || null;
+                chain = chain.then(drain).catch(function () { /* 错误已记录 */ });
+                return chain;
+            },
+            settled: function () { return chain; },
+            close: function () { return chain; },
+            get error() { return failure; }
+        };
     }
 
     // ---------- 注入 UI ----------
@@ -952,6 +1110,9 @@
             'font-size:12px;color:var(--ij-muted);}',
             '.m3u8-inject-fmt.on{background:var(--ij-accent);color:var(--ij-accent-fg);border-color:var(--ij-accent);}',
             '.m3u8-inject-fmt.off{opacity:.42;cursor:not-allowed;}',
+            '.m3u8-inject-check{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ij-muted);cursor:pointer;user-select:none;}',
+            '.m3u8-inject-check input{width:13px;height:13px;accent-color:var(--ij-accent);cursor:pointer;flex:0 0 auto;}',
+            '.m3u8-inject-check:hover{color:var(--ij-fg);}',
             '.m3u8-inject-btn{width:100%;padding:9px;background:var(--ij-accent);color:var(--ij-accent-fg);border:none;border-radius:8px;',
             'font-size:13px;font-weight:600;cursor:pointer;}',
             '.m3u8-inject-btn:hover{opacity:.88;}',
@@ -1016,6 +1177,11 @@
             '<span class="m3u8-inject-fmt m3u8-inject-fmt-ts" data-fmt="ts" role="button" tabindex="0">TS</span>' +
             '<span class="m3u8-inject-fmt on m3u8-inject-fmt-mp4" data-fmt="mp4" role="button" tabindex="0">MP4</span>' +
             '</div></div>' +
+            '<div class="m3u8-inject-row m3u8-inject-stream-row" hidden>' +
+            '<label class="m3u8-inject-check" title="' + TEXT.streamHint + '">' +
+            '<input type="checkbox" class="m3u8-inject-stream" checked>' +
+            '<span>' + TEXT.streamLabel + '</span>' +
+            '</label></div>' +
             '<div class="m3u8-inject-note" hidden></div>' +
             '<button class="m3u8-inject-btn m3u8-inject-start" type="button">' + TEXT.start + '</button>' +
             '<div class="m3u8-inject-progress"><div class="bar"></div></div>' +
@@ -1046,6 +1212,8 @@
         refs.start = panel.querySelector('.m3u8-inject-start');
         refs.fmtTs = panel.querySelector('.m3u8-inject-fmt-ts');
         refs.fmtMp4 = panel.querySelector('.m3u8-inject-fmt-mp4');
+        refs.streamRow = panel.querySelector('.m3u8-inject-stream-row');
+        refs.stream = panel.querySelector('.m3u8-inject-stream');
 
         refs.title.textContent = TEXT.title;
         state.panel = panel;
@@ -1056,6 +1224,16 @@
             var concValue = String(state.prefs.concurrency);
             if (refs.conc.querySelector('option[value="' + concValue + '"]')) refs.conc.value = concValue;
         }
+        if (supportsStreamSave()) {
+            refs.streamRow.hidden = false;
+            if (state.prefs.stream === false) refs.stream.checked = false;
+        } else {
+            refs.streamRow.hidden = true;
+            refs.stream.checked = false;
+        }
+        refs.stream.addEventListener('change', function () {
+            savePrefs({ stream: Boolean(refs.stream.checked) });
+        });
         syncFormatButtons();
 
         // 交互
@@ -1208,6 +1386,7 @@
         refs.name.disabled = busy;
         refs.quality.disabled = busy;
         refs.conc.disabled = busy;
+        if (refs.stream) refs.stream.disabled = busy;
     }
 
     function syncFilenamePlaceholder() {
@@ -1421,12 +1600,44 @@
         startDownload();
     }
 
+    // 选择保存位置：必须在点击的用户激活期内发起，所以放在 startDownload 最前面。
+    async function pickStreamTarget(inputUrl) {
+        if (!state.refs.stream || !state.refs.stream.checked) return null;
+        if (!supportsStreamSave()) {
+            setNote(TEXT.streamUnsupported);
+            return null;
+        }
+        var extension = state.playlist && state.playlist.container === 'fmp4'
+            ? 'mp4'
+            : (state.format === 'ts' ? 'ts' : 'mp4');
+        var base = sanitizeFilename(state.refs.name.value) || state.lastFileBase || fileBaseFromUrl(inputUrl);
+        try {
+            var handle = await window.showSaveFilePicker({
+                suggestedName: base + '.' + extension,
+                types: extension === 'ts'
+                    ? [{ description: 'MPEG-TS', accept: { 'video/mp2t': ['.ts'] } }]
+                    : [{ description: 'MP4', accept: { 'video/mp4': ['.mp4'] } }]
+            });
+            return { handle: handle, extension: extension };
+        } catch (error) {
+            if (error && error.name === 'AbortError') return 'canceled';
+            setNote(TEXT.pickFailed + (error && error.message ? error.message : error));
+            return null;
+        }
+    }
+
     async function startDownload() {
         var refs = state.refs;
         var inputUrl = normalizeInputUrl(refs.url.value);
         if (!inputUrl) {
             setStatus(TEXT.needUrl, true);
             refs.url.focus();
+            return;
+        }
+
+        var streamTarget = await pickStreamTarget(inputUrl);
+        if (streamTarget === 'canceled') {
+            setStatus(TEXT.canceled);
             return;
         }
 
@@ -1441,21 +1652,28 @@
 
         var startedAt = Date.now();
         var totalBytes = 0;
+        var writtenBytes = 0;
         var doneCount = 0;
         var failCount = 0;
         var totalCount = 0;
         var keyCache = new Map();
+        var writer = null;
+        var sink = null;
+        var ordered = null;
+        var savedFileName = '';
+        var writeFailure = null;
 
         function renderStats() {
             if (!totalCount) return;
             setCount(doneCount + '/' + totalCount);
+            var shownBytes = writer ? writtenBytes : totalBytes;
             var elapsed = (Date.now() - startedAt) / 1000;
-            var speed = elapsed > 0.6 ? totalBytes / elapsed : 0;
-            var parts = [fmtBytes(totalBytes)];
+            var speed = elapsed > 0.6 ? shownBytes / elapsed : 0;
+            var parts = [fmtBytes(shownBytes)];
             var speedText = fmtSpeed(speed);
             if (speedText) parts.push(speedText);
             if (speed > 0 && doneCount > 0 && doneCount < totalCount) {
-                var remainBytes = (totalBytes / doneCount) * (totalCount - doneCount);
+                var remainBytes = (shownBytes / doneCount) * (totalCount - doneCount);
                 parts.push('~' + fmtDuration(remainBytes / speed));
             }
             if (failCount) parts.push(failCount + ' ✕');
@@ -1505,6 +1723,61 @@
                 : new Map();
             if (controller.signal.aborted) throw abortError();
 
+            var filenameBase = sanitizeFilename(refs.name.value) || state.lastFileBase || fileBaseFromUrl(mediaUrl);
+            var outputExtension = (isFmp4 || outputFormat === 'mp4') ? 'mp4' : 'ts';
+
+            // 走查还没完成时用户可能按 TS 选了保存名，但源其实是 fMP4：此时回退到内存模式，
+            // 避免把 MP4 内容写进 .ts 文件。
+            if (isFmp4 && streamTarget && streamTarget.extension !== 'mp4') {
+                streamTarget = null;
+                setNote(TEXT.fmp4Note);
+            }
+
+            if (streamTarget) {
+                if (!isFmp4 && outputFormat === 'mp4') await loadMux();
+                writer = createFileWriter(streamTarget.handle, function (delta) { writtenBytes += delta; });
+                try {
+                    await writer.open();
+                } catch (error) {
+                    writer = null;
+                    throw error;
+                }
+                savedFileName = writer.fileName || (filenameBase + '.' + outputExtension);
+            }
+
+            if (writer) {
+                if (isFmp4) {
+                    sink = {
+                        write: function (chunk) { return writer.write(chunk); },
+                        close: function () { return writer.close(); },
+                        abort: function () { return writer.abort(); }
+                    };
+                    // fMP4 的 init 段必须写在最前，且按 map 变化插入。
+                    var lastMapKey = '';
+                    for (var si = 0; si < segments.length; si++) {
+                        var mapKeyValue = mapKey(segments[si]);
+                        if (!mapKeyValue || mapKeyValue === lastMapKey) continue;
+                        var initBytes = initCache.get(mapKeyValue);
+                        if (initBytes && initBytes.length) await writer.write(initBytes);
+                        lastMapKey = mapKeyValue;
+                    }
+                } else if (outputFormat === 'mp4') {
+                    sink = createMp4StreamPipeline(writer);
+                    if (!sink) throw new Error(TEXT.muxLoadHint);
+                } else {
+                    sink = {
+                        write: function (chunk) { return writer.write(chunk); },
+                        close: function () { return writer.close(); },
+                        abort: function () { return writer.abort(); }
+                    };
+                }
+                ordered = createOrderedSink(function (chunk) { return sink.write(chunk); }, segments.length, function (error) {
+                    // 写盘失败（磁盘满、权限被收回等）立即停下，避免继续把分片堆在内存里。
+                    writeFailure = writeFailure || error;
+                    if (controller && !controller.signal.aborted) controller.abort();
+                });
+            }
+
             setProgress(0);
             renderStats();
 
@@ -1512,9 +1785,16 @@
                 signal: controller.signal,
                 concurrency: Number(refs.conc.value) || 6,
                 keyCache: keyCache,
+                consume: Boolean(ordered),
                 onSegment: function (index, bytes, isFailed) {
-                    if (isFailed) failCount += 1;
-                    else { doneCount += 1; totalBytes += bytes; }
+                    if (isFailed) {
+                        failCount += 1;
+                        if (ordered) ordered.push(index, null);
+                    } else {
+                        doneCount += 1;
+                        totalBytes += bytes ? bytes.length : 0;
+                        if (ordered) ordered.push(index, bytes);
+                    }
                     setProgress((doneCount + failCount) / segments.length);
                     renderStats();
                 },
@@ -1524,15 +1804,29 @@
                 }
             });
 
+            if (ordered) {
+                await ordered.settled();
+                if (ordered.error) throw ordered.error;
+            }
             if (controller.signal.aborted) throw abortError();
+
+            if (ordered) {
+                setStatus(TEXT.writing);
+                await sink.close();
+                sink = null;
+                setProgress(1);
+                var savedSummary = TEXT.done + (savedFileName || filenameBase + '.' + outputExtension) + ' (' + fmtBytes(writtenBytes) + ')';
+                if (failCount > 0) savedSummary += ' · ' + TEXT.partial + failCount + TEXT.partialUnit;
+                setStatus(savedSummary, failCount > 0);
+                setCount(doneCount + '/' + totalCount);
+                return;
+            }
 
             var parts = outcome.results;
             var validCount = parts.filter(function (part) { return part && part.length; }).length;
             if (!validCount) throw new Error(TEXT.downloadFailed);
 
             setStatus(TEXT.merging);
-            var filenameBase = sanitizeFilename(refs.name.value) || state.lastFileBase || fileBaseFromUrl(mediaUrl);
-
             var output;
             if (isFmp4) {
                 output = assembleFmp4(parts, segments, initCache);
@@ -1546,13 +1840,20 @@
             }
 
             setProgress(1);
-            var sizeText = fmtBytes(totalBytes);
-            var summary = TEXT.done + filenameBase + '.' + (isFmp4 || outputFormat === 'mp4' ? 'mp4' : 'ts') + ' (' + sizeText + ')';
+            var summary = TEXT.done + filenameBase + '.' + outputExtension + ' (' + fmtBytes(totalBytes) + ')';
             if (failCount > 0) summary += ' · ' + TEXT.partial + failCount + TEXT.partialUnit;
             setStatus(summary, failCount > 0);
             setCount(doneCount + '/' + totalCount);
         } catch (error) {
-            if (isAbortError(error)) {
+            if (sink) {
+                try { await sink.abort(); } catch (e) { /* ignore */ }
+                sink = null;
+            } else if (writer) {
+                await writer.abort();
+            }
+            if (writeFailure) {
+                setStatus(TEXT.writeFailed + (writeFailure.message || writeFailure), true);
+            } else if (isAbortError(error)) {
                 setStatus(TEXT.canceled);
             } else {
                 setStatus(TEXT.failed + (error && error.message ? error.message : error), true);
