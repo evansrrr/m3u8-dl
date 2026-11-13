@@ -377,7 +377,7 @@
         'fMP4、Byte Range、外部音轨/字幕和边下边存均已作为常规能力提供。': 'fMP4, byte range, external audio/subtitles and streaming save are all available as regular features.',
         '强制合并只导出从范围起点开始连续成功的本地分片。': 'Force merge exports only consecutive successful local segments from the range start.',
         '点击任务进度条可查看分片状态，失败分片可点击重试。': 'Click the task progress bar to inspect segment states; click a failed segment to retry.',
-        '源站禁止跨域时：点击“复制跨域代码”→ 在视频源站按 F12 打开控制台 → 粘贴执行 → 页面出现注入下载面板，在同源上下文下载分片，绕过跨域限制。': 'When a source blocks cross-origin requests: click "Copy cross-origin code", open the source site console with F12, paste and run it; the injected panel then downloads segments in the same origin, bypassing CORS.',
+        '源站禁止跨域时：点击“复制跨域代码”→ 在视频源站按 F12 打开控制台 → 粘贴执行 → 注入面板会自动填入页面最近的 m3u8 请求，支持清晰度选择、分片重试与 fMP4 拼接。': 'When a source blocks cross-origin requests: click "Copy cross-origin code", open the source site console with F12, paste and run it; the injected panel auto-fills the most recent m3u8 request from the page and supports quality selection, segment retries and fMP4 concatenation.',
         '快捷下载 URL 参数': 'Quick download URL parameters',
         '：m3u8 地址，推荐 URL 编码。': ': m3u8 URL, URL-encoding recommended.',
         '：预填保存标题。': ': prefill the save title.',

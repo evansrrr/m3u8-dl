@@ -5815,12 +5815,16 @@ function getInjectScriptBaseUrl() {
 
 function buildCrossOriginInjectCode() {
     const base = getInjectScriptBaseUrl();
-    const scriptUrl = new URL('inject.js?v=202611140001', base).href;
+    const scriptUrl = new URL('inject.js?v=202611140002', base).href;
+    const seedInput = document.getElementById('new-url');
+    const seedUrl = String(seedInput?.value || '').trim();
     return '(function(){'
         + 'if(window.__m3u8InjectV2Loaded__){window.__m3u8InjectV2Show__&&window.__m3u8InjectV2Show__();return;}'
         + 'window.__M3U8_BASE__=' + JSON.stringify(base) + ';'
+        + (seedUrl ? 'window.__M3U8_SEED_URL__=' + JSON.stringify(seedUrl) + ';' : '')
         + 'var s=document.createElement("script");'
         + 's.src=' + JSON.stringify(scriptUrl) + ';'
+        + 's.onerror=function(){console.error("[M3U8] inject.js failed to load — deploy this tool over http(s), or the page CSP blocked it. / 注入脚本加载失败，请确认工具以 http(s) 部署且未被页面 CSP 拦截。");};'
         + 'document.head.appendChild(s);'
         + '})();';
 }
