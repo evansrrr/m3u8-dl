@@ -460,6 +460,7 @@
         [/^范围 (\d+)-(\d+) \/ (\d+) 片$/, function (m) { return 'Range ' + m[1] + '-' + m[2] + ' / ' + m[3] + ' segments'; }],
         [/^范围 (\d+)-(\d+)$/, function (m) { return 'Range ' + m[1] + '-' + m[2]; }],
         [/^全部 (\d+) 片$/, function (m) { return 'All ' + m[1] + ' segments'; }],
+        [/^已下载 (\d+) \/ 共 (\d+) 片$/, function (m) { return m[1] + ' of ' + m[2] + ' segments'; }],
         [/^(\d+) \/ 原始 (\d+)$/, function (m) { return m[1] + ' / original ' + m[2]; }],
         [/^恢复第 (\d+) 片$/, function (m) { return 'Resume segment ' + m[1]; }],
         [/^已重试第 (\d+) 片$/, function (m) { return 'Retried segment ' + m[1]; }],
@@ -503,6 +504,9 @@
     ];
 
     var ATTRS = ['title', 'aria-label', 'placeholder', 'data-tooltip', 'alt'];
+    // Dynamic labels need the pattern rules; `title`/`alt` may hold URLs or file
+    // names, so they stay on the exact-match dictionary only.
+    var RULE_ATTRS = {'aria-label': true, 'data-tooltip': true};
     var SKIP_TAGS = {
         SCRIPT: true,
         STYLE: true,
@@ -549,7 +553,7 @@
             var name = ATTRS[i];
             if (!element.hasAttribute(name)) continue;
             var current = element.getAttribute(name);
-            var next = translateString(current, false);
+            var next = translateString(current, RULE_ATTRS[name] === true);
             if (next !== current) element.setAttribute(name, next);
         }
     }

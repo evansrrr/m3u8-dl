@@ -966,6 +966,14 @@ svg.task-row__status-icon {
     white-space: nowrap;
 }
 
+.task-row__progress-count {
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-faint, var(--text-muted));
+    white-space: nowrap;
+}
+
 .task-row__actions {
     display: inline-flex;
     align-items: center;

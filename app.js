@@ -2132,7 +2132,22 @@ function hasCompletedTaskExportData(task) {
 
 function createTaskCardHTML(task) {
     const rawTitle = task.title || '未命名任务';
-    const progress = normalizeTaskProgress(getTaskActiveStageProgress(task).progress);
+    const progressStage = getTaskActiveStageProgress(task);
+    const progress = normalizeTaskProgress(progressStage.progress);
+    // A custom range only downloads part of the playlist, so the denominator has
+    // to follow the requested count instead of the whole segment list.
+    const segmentTotal = Math.max(0, Math.round(
+        progressStage.kind === 'video'
+            ? (Number(task.requestedSegmentCount) || Number(progressStage.totalSegments) || 0)
+            : (Number(progressStage.totalSegments) || 0)
+    ));
+    const segmentCompleted = Math.min(
+        segmentTotal,
+        Math.max(0, Math.round(Number(progressStage.completedSegments) || 0))
+    );
+    const segmentCountHTML = segmentTotal > 0
+        ? `<span class="task-row__progress-count" aria-label="${escapeHTML(`已下载 ${segmentCompleted} / 共 ${segmentTotal} 片`)}">${segmentCompleted}/${segmentTotal}</span>`
+        : '';
     const format = escapeHTML(task.format || DEFAULT_TASK_PARAMS.format);
     const duration = escapeHTML(task.duration || '00:00:00');
     const status = escapeHTML(task.status || 'downloading');
@@ -2256,6 +2271,7 @@ function createTaskCardHTML(task) {
                         <div class="task-row__progress-bar" style="width: ${progress}%;"></div>
                     </div>
                     <span class="task-row__progress-text">${progress}%</span>
+                    ${segmentCountHTML}
                 </div>
             </div>
             <div class="task-row__actions">
@@ -5799,7 +5815,7 @@ function getInjectScriptBaseUrl() {
 
 function buildCrossOriginInjectCode() {
     const base = getInjectScriptBaseUrl();
-    const scriptUrl = new URL('inject.js?v=202611120001', base).href;
+    const scriptUrl = new URL('inject.js?v=202611130001', base).href;
     return '(function(){'
         + 'if(window.__m3u8InjectV2Loaded__){window.__m3u8InjectV2Show__&&window.__m3u8InjectV2Show__();return;}'
         + 'window.__M3U8_BASE__=' + JSON.stringify(base) + ';'
