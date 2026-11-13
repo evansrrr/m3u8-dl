@@ -4754,7 +4754,7 @@ function buildTaskFromResolvedDraft(taskDraft, resolvedSource, range = null) {
     const selectedAudioRenditionId = taskDraft.selectedAudioRenditionId || '';
     const selectedAudioCodecFamily = taskDraft.selectedAudioCodecFamily || '';
     const selectedSubtitleRenditionId = taskDraft.selectedSubtitleRenditionId || '';
-    const streamSaveEnabled = Boolean(taskParams.streamSave) && taskParams.format !== 'mp4';
+    const streamSaveEnabled = Boolean(taskParams.streamSave);
     return {
         id: taskId,
         title,
@@ -5815,7 +5815,7 @@ function getInjectScriptBaseUrl() {
 
 function buildCrossOriginInjectCode() {
     const base = getInjectScriptBaseUrl();
-    const scriptUrl = new URL('inject.js?v=202611130001', base).href;
+    const scriptUrl = new URL('inject.js?v=202611140001', base).href;
     return '(function(){'
         + 'if(window.__m3u8InjectV2Loaded__){window.__m3u8InjectV2Show__&&window.__m3u8InjectV2Show__();return;}'
         + 'window.__M3U8_BASE__=' + JSON.stringify(base) + ';'
@@ -7653,6 +7653,23 @@ function canUseFileSystemStreamSave() {
     return typeof globalThis.showSaveFilePicker === 'function';
 }
 
+function localizeUiText(text) {
+    try {
+        const translator = globalThis.i18n?.translate;
+        return typeof translator === 'function' ? translator(text, true) : text;
+    } catch {
+        return text;
+    }
+}
+
+function buildSaveFilePickerTypes(task) {
+    const extension = getTaskOutputExtension(task);
+    if (extension === 'mp4') {
+        return [{ description: localizeUiText('MP4 视频'), accept: { 'video/mp4': ['.mp4'] } }];
+    }
+    return [{ description: localizeUiText('MPEG-TS 视频'), accept: { 'video/mp2t': ['.ts'] } }];
+}
+
 async function pickNewTaskSaveTarget(taskDraft) {
     if (!canUseFileSystemStreamSave() || !canTaskUseStreamSave(taskDraft)) {
         return { ok: true, taskDraft };
@@ -7663,7 +7680,7 @@ async function pickNewTaskSaveTarget(taskDraft) {
         // transient user activation from the new-task confirmation click.
         const pickerPromise = globalThis.showSaveFilePicker({
             suggestedName: buildTaskOutputFileName(taskDraft),
-            types: [{ description: 'MPEG-TS 视频', accept: { 'video/mp2t': ['.ts'] } }]
+            types: buildSaveFilePickerTypes(taskDraft)
         });
         const fileHandle = await pickerPromise;
         return {
@@ -7694,7 +7711,7 @@ async function selectTaskSaveTarget(taskId) {
     try {
         // Invoke the picker synchronously from the click's user activation.
         const fileHandle = await globalThis.showSaveFilePicker({ suggestedName: buildTaskOutputFileName(task),
-            types: [{ description: 'MPEG-TS 视频', accept: { 'video/mp2t': ['.ts'] } }] });
+            types: buildSaveFilePickerTypes(task) });
         if (typeof fileHandle.requestPermission === 'function'
             && await fileHandle.requestPermission({ mode: 'readwrite' }) !== 'granted') {
             showToast('未获得保存权限，请重新选择保存位置', { type: 'info' });
@@ -7707,8 +7724,18 @@ async function selectTaskSaveTarget(taskId) {
     }
 }
 
+function wrapStreamWriterForTask(writer, task) {
+    if (!writer) return null;
+    if (String(task?.format || '') !== 'mp4') return writer;
+    return createMp4StreamPipeline(writer);
+}
+
 async function createTaskStreamWriter(task) {
     if (!canTaskUseStreamSave(task)) {
+        return null;
+    }
+    // MP4 边下边存依赖 mux.js 逐段转封装；运行时不可用时退回普通缓存。
+    if (String(task?.format || '') === 'mp4' && typeof globalThis.muxjs?.mp4?.Transmuxer !== 'function') {
         return null;
     }
     const assertCurrent = typeof createTaskExecutionGuard === 'function' ? createTaskExecutionGuard(task) : () => {};
@@ -7755,10 +7782,15 @@ async function createTaskStreamWriter(task) {
                 await writer.close();
             }
         };
-        if (taskId) {
-            taskStreamWriters.set(taskId, streamWriterModel);
+        const wrappedWriter = wrapStreamWriterForTask(streamWriterModel, task);
+        if (!wrappedWriter) {
+            await streamWriterModel.abort();
+            return null;
         }
-        return streamWriterModel;
+        if (taskId) {
+            taskStreamWriters.set(taskId, wrappedWriter);
+        }
+        return wrappedWriter;
     }
     if (typeof updateTask === 'function') {
         updateTask(task.id, current => ({ ...current, actualWriteMode: 'file-system' }));
@@ -7783,6 +7815,12 @@ async function createTaskStreamWriter(task) {
         async write(bytes) {
             await writable.write(bytes);
         },
+        // 定位写入：用于 MP4 收尾时把 moov 的时长字段回填到文件开头。
+        async patchPrefix(bytes) {
+            if (!(bytes instanceof Uint8Array) || typeof writable.write !== 'function') return false;
+            await writable.write({ type: 'write', position: 0, data: bytes });
+            return true;
+        },
         async close() {
             await writable.close();
         },
@@ -7794,10 +7832,15 @@ async function createTaskStreamWriter(task) {
             await writable.close();
         }
     };
-    if (taskId) {
-        taskStreamWriters.set(taskId, streamWriterModel);
+    const wrappedWriter = wrapStreamWriterForTask(streamWriterModel, task);
+    if (!wrappedWriter) {
+        await streamWriterModel.abort();
+        return null;
     }
-    return streamWriterModel;
+    if (taskId) {
+        taskStreamWriters.set(taskId, wrappedWriter);
+    }
+    return wrappedWriter;
 }
 
 async function downloadFmp4Part(task, part) {
@@ -8214,11 +8257,11 @@ async function downloadTaskSegments(task) {
     let nextSegmentIndex = 0;
     let hasFailure = false;
     const canUseTaskStreamSave = canTaskUseStreamSave(task);
+    const hasSelectedExternalRenditions = Boolean(task.selectedAudioRenditionId || task.selectedSubtitleRenditionId);
     const streamSaveBlockReason = !task.streamSave
         ? ''
-        : isFmp4Task(task) ? 'fmp4' : (task.format === 'mp4' ? 'mp4' : '');
+        : isFmp4Task(task) ? 'fmp4' : (hasSelectedExternalRenditions ? 'renditions' : '');
     const isFmp4StreamSaveDowngrade = Boolean(task.streamSave && streamSaveBlockReason && !canUseTaskStreamSave);
-    const hasSelectedExternalRenditions = Boolean(task.selectedAudioRenditionId || task.selectedSubtitleRenditionId);
     const runFileSelection = typeof enqueueFileSelection === 'function'
         ? enqueueFileSelection
         : operation => operation();
@@ -8253,11 +8296,9 @@ async function downloadTaskSegments(task) {
     }
     if (isFmp4StreamSaveDowngrade && !task.streamSaveFmp4DowngradeNotified) {
         showToast(
-            streamSaveBlockReason === 'mp4'
-                ? 'MP4 输出需要先缓存再转封装，本次不使用边下边存。'
-                : hasSelectedExternalRenditions
-                    ? '已选择外部音轨或字幕，本次将分别缓存后保存；直接打开视频可能无声。'
-                    : 'fMP4 将先缓存后保存，暂不使用边下边存。',
+            hasSelectedExternalRenditions
+                ? '已选择外部音轨或字幕，本次将分别缓存后保存；直接打开视频可能无声。'
+                : 'fMP4 将先缓存后保存，暂不使用边下边存。',
             { type: 'info' }
         );
         task.streamSaveFmp4DowngradeNotified = true;
@@ -8746,10 +8787,12 @@ function canTaskUseStreamSave(task) {
     if (isFmp4Task(task)) {
         return false;
     }
-    // MP4 输出需要在全部缓存完成后经 mux.js 转封装，无法边下边存。
-    if (task?.format === 'mp4') {
+    // 外部音轨/字幕要额外写出独立文件，边下边存只写视频轨，这类任务回退到缓存。
+    if (task?.selectedAudioRenditionId || task?.selectedSubtitleRenditionId) {
         return false;
     }
+    // MP4 以分片结构（fMP4）写出：每个分片到达后立即经 mux.js 转封装并追加到
+    // 文件，因此同样可以边下边存，不需要等到全部缓存完成。
     return Boolean(task?.streamSave);
 }
 
@@ -9303,6 +9346,98 @@ async function transmuxTsBlobPartsToMp4(parts, taskId = '') {
         throw new Error('MP4 不兼容，建议改用 TS');
     }
     return mp4Parts;
+}
+
+/*
+ * MP4 边下边存：mux.js 的 Transmuxer 支持逐段 push + flush，每次 flush 都会产出一个
+ * 自包含的 moof+mdat 分片，以及一份 initSegment（ftyp+moov）。因此可以在分片到达时
+ * 立即转封装并追加写入文件，内存中只需要当前分片，不再堆积整部视频。
+ * 输出结构与"缓存后导出"的 MP4 完全一致，都是分片式 MP4（fMP4）。
+ */
+function createMp4StreamPipeline(rawWriter) {
+    const Transmuxer = globalThis.muxjs?.mp4?.Transmuxer;
+    if (typeof Transmuxer !== 'function' || !rawWriter) return null;
+
+    const transmuxer = new Transmuxer();
+    let initSegment = null;
+    let normalizer = null;
+    let pendingFragments = [];
+    let initWritten = false;
+    let emptyPushCount = 0;
+
+    transmuxer.on('data', segment => {
+        if (!initSegment && segment?.initSegment instanceof Uint8Array) {
+            initSegment = segment.initSegment;
+            normalizer = createMp4TimebaseNormalizer(initSegment);
+        }
+        if (segment?.data instanceof Uint8Array && segment.data.byteLength > 0) {
+            if (normalizer) normalizeMp4FragmentTimebase(normalizer, segment.data);
+            pendingFragments.push(segment.data);
+        }
+    });
+
+    function disposeTransmuxer() {
+        if (typeof transmuxer.dispose !== 'function') return;
+        try {
+            transmuxer.dispose();
+        } catch {
+            // Disposal only frees internal buffers.
+        }
+    }
+
+    return {
+        mode: rawWriter.mode,
+        outputFileName: rawWriter.outputFileName,
+        async write(bytes) {
+            const isBlob = typeof Blob === 'function' && bytes instanceof Blob;
+            const data = isBlob ? new Uint8Array(await bytes.arrayBuffer()) : bytes;
+            if (!(data instanceof Uint8Array)) throw new Error('MP4 不兼容，建议改用 TS');
+            if (data.byteLength === 0) return;
+
+            pendingFragments = [];
+            transmuxer.push(data);
+            transmuxer.flush();
+
+            if (!initSegment) {
+                // 音视频轨要读到首个完整 GOP 才会建立，留一个分片的宽限。
+                emptyPushCount += 1;
+                if (emptyPushCount >= 2) throw new Error('MP4 不兼容，建议改用 TS');
+                return;
+            }
+            if (!initWritten) {
+                // 复制一份写入，initSegment 本身要留着在收尾时回填时长字段。
+                await rawWriter.write(new Uint8Array(initSegment));
+                initWritten = true;
+            }
+            for (const fragment of pendingFragments) {
+                await rawWriter.write(fragment);
+            }
+            pendingFragments = [];
+        },
+        async close() {
+            disposeTransmuxer();
+            if (!initWritten) throw new Error('MP4 不兼容，建议改用 TS');
+            if (normalizer) {
+                finalizeMp4Timebase(normalizer);
+                // moov 的时长字段只能回填；仅原生文件句柄支持回到文件开头改写。
+                if (typeof rawWriter.patchPrefix === 'function') {
+                    try {
+                        await rawWriter.patchPrefix(initSegment);
+                    } catch {
+                        // 时长字段不影响解码，回填失败不阻断保存。
+                    }
+                }
+            }
+            await rawWriter.close();
+        },
+        async abort() {
+            disposeTransmuxer();
+            pendingFragments = [];
+            if (typeof rawWriter.abort === 'function') {
+                await rawWriter.abort();
+            }
+        }
+    };
 }
 
 async function triggerMp4Download(parts, outputFileName, taskId = '') {

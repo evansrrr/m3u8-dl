@@ -35,16 +35,16 @@
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="M3U8下载">
     <meta name="twitter:description" content="纯浏览器 m3u8 / HLS 下载与播放工具，支持在线播放、分片下载、解密、保存和恢复。">
-    <link rel="icon" href="favicon.svg?v=202611130001" type="image/svg+xml">
-    <link rel="stylesheet" href="style.css?v=202611130001">
+    <link rel="icon" href="favicon.svg?v=202611140001" type="image/svg+xml">
+    <link rel="stylesheet" href="style.css?v=202611140001">
     <!-- Lucide Icons (local vendor bundle) -->
-    <script src="vendor/lucide.min.js?v=202611130001"></script>
+    <script src="vendor/lucide.min.js?v=202611140001"></script>
     <!-- HLS preview runtime (local vendor bundle) -->
-    <script src="vendor/hls.min.js?v=202611130001"></script>
+    <script src="vendor/hls.min.js?v=202611140001"></script>
     <!-- TS to MP4 transmux runtime (local vendor bundle) -->
-    <script src="vendor/mux.min.js?v=202611130001"></script>
+    <script src="vendor/mux.min.js?v=202611140001"></script>
     <!-- UI language runtime (must load before app.js) -->
-    <script src="i18n.js?v=202611130001"></script>
+    <script src="i18n.js?v=202611140001"></script>
 </head>
 <body>
     <div id="app-loader" class="app-loader" aria-hidden="true"></div>
@@ -186,7 +186,7 @@
                             <input type="checkbox" id="new-stream-save">
                             <span>边下边存</span>
                         </label>
-                        <p class="form-help">开启后会在下载过程中尽量直接写入文件，减少一次性内存占用；仅用于 TS 格式，MP4 需缓存后转封装，浏览器不支持时会自动降级。</p>
+                        <p class="form-help">开启后会在下载过程中直接写入文件，显著降低页面内存占用。TS 直接追加，MP4 逐段转封装为分片结构写入；浏览器不支持时会自动降级为普通缓存。</p>
                     </div>
                     <div class="form-item">
                         <label for="new-concurrency">并发数</label>
@@ -378,7 +378,7 @@
                             <input type="checkbox" id="setting-stream-save">
                             <span>边下边存</span>
                         </label>
-                        <p class="form-help">作为默认偏好，新建任务时会自动带入；仅对 TS 格式生效，浏览器不支持时会自动降级。</p>
+                        <p class="form-help">作为默认偏好，新建任务时会自动带入；TS 与 MP4 均支持，浏览器不支持时会自动降级。</p>
                     </div>
                     <div class="form-item">
                         <label for="setting-format">保存格式</label>
@@ -484,6 +484,6 @@
         </div>
         <div id="app-tooltip" class="app-tooltip" aria-hidden="true"></div>
     </div>
-    <script src="app.js?v=202611130001"></script>
+    <script src="app.js?v=202611140001"></script>
 </body>
 </html>
